@@ -184,6 +184,7 @@
     <item quantity="one">%d model available</item>
     <item quantity="other">%d models available</item>
   </plurals>
+  <string name="model_list_shelf_models_title" translatable="true" description="Section header in the model list for the models listed live from the litert-community organization on Hugging Face. [CHAR_LIMIT=60]">From litert-community on Hugging Face</string>
   <string name="model_list_recommended_models_title" translatable="true" description="Section header in the model list for models recommended for download. [CHAR_LIMIT=31]">Recommended models</string>
   <string name="model_manager" translatable="true" description="Title of the screen where users can manage (download, delete, import) models. [CHAR_LIMIT=22]">Model Manager</string>
   <string name="model_manager_select_task_title" translatable="true" description="Header instructing the user to choose a specific task or use case to try with the models. [CHAR_LIMIT=40]">Select a use case to try</string>
@@ -843,7 +844,7 @@
   <string name="mcp_tool_revoke_permission_content" translatable="true" description="Message asking the user if they are sure they want to revoke the automatic execution permission for the tool. [CHAR_LIMIT=135]">Are you sure you want to revoke permission to automatically call this tool?</string>
   <string name="manage_mcp_servers" translatable="true" description="Title of the screen/bottom sheet where users can manage Model Context Protocol (MCP) servers. [CHAR_LIMIT=31]">Manage MCP servers</string>
   <string name="add_mcp_server" translatable="true" description="Button label to add a new MCP server. [CHAR_LIMIT=26]">Add MCP server</string>
-  <string name="learn_more_about_mcp" translatable="true" description="Link text directing users to documentation about Model Context Protocol (MCP). [CHAR_LIMIT=90]">Learn more about MCP in Google AI Edge Gallery</string>
+  <string name="learn_more_about_mcp" translatable="true" description="Link text directing users to documentation about Model Context Protocol (MCP). [CHAR_LIMIT=90]">Learn more about MCP</string>
   <string name="learn_more_about_mcp_short" translatable="true" description="Link text to learn more about MCP (Model Context Protocol). [CHAR_LIMIT=18]">Learn more</string>
   <string name="search_mcp_server" translatable="true" description="Placeholder text in a search field to search for an MCP (Model Context Protocol) server. [CHAR_LIMIT=37]">Search for an MCP server</string>
   <plurals name="mcp_servers_count" translatable="true">
@@ -1781,7 +1782,7 @@
   <string name="model_status_unavailable_using" translatable="true" description="Status label beneath an ASR or TTS model selector when the selected model can't be used and the app uses another speech engine instead. %1$s is the selected model name, for example 'Kokoro 82M (TTS)'. %2$s is the engine used instead, for example 'Android System (Built-in)'. [CHAR_LIMIT=80]">%1$s unavailable · using %2$s</string>
   <string name="model_tag_asr" translatable="true" description="Short modality badge tag displayed on Automatic Speech Recognition supplementary model cards. [CHAR_LIMIT=8]">ASR</string>
   <string name="model_tag_tts" translatable="true" description="Short modality badge tag displayed on Text-to-Speech supplementary model cards. [CHAR_LIMIT=8]">TTS</string>
-  <string name="tts_voice_preview_text" translatable="true" description="Sample sentence spoken aloud (not shown on screen) when the user taps a text-to-speech voice in Model Manager or settings, so they can hear how the voice sounds. 'AI Edge Gallery' is a product name and must not be translated. [CHAR_LIMIT=120]">Welcome to AI Edge Gallery</string>
+  <string name="tts_voice_preview_text" translatable="true" description="Sample sentence spoken aloud (not shown on screen) when the user taps a text-to-speech voice in Model Manager or settings, so they can hear how the voice sounds. 'Model Shelf' is the app name and must not be translated. [CHAR_LIMIT=120]">Welcome to Model Shelf</string>
   <string name="cd_tts_preview_voice" translatable="true" description="Content description for the Play button that synthesizes a sample preview for a specific TTS voice profile, where %1$s is the voice display name. [CHAR_LIMIT=45]">Preview %1$s voice</string>
   <string name="cd_tts_stop_preview_voice" translatable="true" description="Content description for the Stop button that stops an active TTS voice profile preview, where %1$s is the voice display name. [CHAR_LIMIT=45]">Stop %1$s voice preview</string>
   <string name="tts_default_for_read_aloud" translatable="true" description="Checkbox label on a downloaded supplementary text-to-speech model card in Model Manager; when checked, this model reads chat responses aloud instead of the built-in Android voice. [CHAR_LIMIT=50]">Default to this model for read aloud</string>

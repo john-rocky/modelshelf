@@ -81,6 +81,9 @@ import com.google.ai.edge.gallery.data.supplementary.SupplementarySpeechModelRep
 import com.google.ai.edge.gallery.di.IoDispatcher
 import com.google.ai.edge.gallery.firebaseAnalytics
 import com.google.ai.edge.gallery.huggingface.HuggingFaceApiClient
+import com.google.ai.edge.gallery.huggingface.LiveListClient
+import com.google.ai.edge.gallery.huggingface.LiveListUiState
+import com.google.ai.edge.gallery.huggingface.statusLine
 import com.google.ai.edge.gallery.proto.AccessTokenData
 import com.google.ai.edge.gallery.proto.HfModelItemProto
 import com.google.ai.edge.gallery.proto.ImportedModel
@@ -478,6 +481,14 @@ constructor(
 
   /** Dispatcher that [loadModelAllowlist] runs on. Overridden in tests to load synchronously. */
   @VisibleForTesting internal var allowlistLoadingDispatcher: CoroutineDispatcher = Dispatchers.IO
+
+  /** The shelf: litert-community's LiteRT-LM repos, listed live and saved on the device. */
+  private val liveListClient = LiveListClient(File(context.filesDir, "live_list"))
+
+  private val _liveListState = MutableStateFlow(LiveListUiState())
+
+  /** Which listed models come from the shelf, the line under each, and the shelf's status. */
+  val liveListState: StateFlow<LiveListUiState> = _liveListState.asStateFlow()
 
   /**
    * The provider of device identity matched against device-requirement sets. Overridden in tests.
@@ -2169,9 +2180,37 @@ constructor(
           }
         }
 
-        if (modelAllowlist == null) {
+        // Add the shelf (litert-community on Hugging Face) after Google's allowlist. A file that
+        // Google's allowlist already lists (same repo and file, or same name) keeps Google's entry.
+        val liveList =
+          try {
+            liveListClient.load()
+          } catch (e: CancellationException) {
+            throw e
+          } catch (e: Exception) {
+            Log.e(TAG, "Failed to load the shelf", e)
+            null
+          }
+        val googleModels = modelAllowlist?.models.orEmpty()
+        val googleFiles = googleModels.map { it.modelId to it.modelFile }.toSet()
+        val googleNames = googleModels.map { it.name }.toSet()
+        val shelfModels =
+          liveList?.models.orEmpty().filter {
+            (it.modelId to it.modelFile) !in googleFiles && it.name !in googleNames
+          }
+        _liveListState.value =
+          LiveListUiState(
+            modelNames = shelfModels.map { it.name }.toSet(),
+            notes = liveList?.notes.orEmpty(),
+            // Count what the list shows: files Google's allowlist already has are not repeated.
+            status = liveList?.copy(models = shelfModels)?.statusLine().orEmpty(),
+          )
+        if (modelAllowlist == null && shelfModels.isEmpty()) {
           _uiState.update { it.copy(loadingModelAllowlistError = "Failed to load model list") }
           return@launch
+        }
+        modelAllowlist = (modelAllowlist ?: ModelAllowlist()).let {
+          it.copy(models = it.models + shelfModels)
         }
 
         Log.d(TAG, "Allowlist: $modelAllowlist")

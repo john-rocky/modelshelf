@@ -44,6 +44,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
@@ -61,6 +62,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.google.ai.edge.gallery.R
+import com.google.ai.edge.gallery.data.BuiltInTaskId
 import com.google.ai.edge.gallery.data.Model
 import com.google.ai.edge.gallery.data.Task
 import com.google.ai.edge.gallery.data.supportModelBenchmark
@@ -132,6 +134,14 @@ fun ModelList(
       }
     }
 
+  // The shelf (litert-community on Hugging Face) gets its own section below Google's models.
+  val liveListState by modelManagerViewModel.liveListState.collectAsState()
+  val galleryModels = models.filter { it.name !in liveListState.modelNames }
+  val shelfModels = models.filter { it.name in liveListState.modelNames }
+  val showShelfSection =
+    shelfModels.isNotEmpty() ||
+      (task.id == BuiltInTaskId.LLM_CHAT && liveListState.status.isNotEmpty())
+
   val listState = rememberLazyListState()
 
   val headerAnimation = rememberTaskHeaderAnimation(enableAnimation = enableAnimation)
@@ -158,7 +168,7 @@ fun ModelList(
       }
 
       // Title for recommended models.
-      if (!models.isEmpty()) {
+      if (!galleryModels.isEmpty()) {
         item(key = "recommendedModelsTitle") {
           Text(
             stringResource(R.string.model_list_recommended_models_title),
@@ -174,7 +184,7 @@ fun ModelList(
       }
 
       // List of models within a task.
-      items(items = models) { model ->
+      items(items = galleryModels) { model ->
         if (!model.isVariant) {
           val expanded = modelItemExpandedStates.getOrDefault(model.name, null)
           ModelItem(
@@ -193,6 +203,61 @@ fun ModelList(
                 translationY = (CONTENT_ANIMATION_OFFSET * (1 - modelListProgress)).toPx()
               },
           )
+        }
+      }
+
+      // The shelf: title, status line, then one item per file with its note.
+      if (showShelfSection) {
+        item(key = "shelfModelsTitle") {
+          Column(
+            modifier =
+              Modifier.padding(horizontal = 16.dp)
+                .padding(top = 32.dp, bottom = 8.dp)
+                .graphicsLayer {
+                  alpha = modelListProgress
+                  translationY = (CONTENT_ANIMATION_OFFSET * (1 - modelListProgress)).toPx()
+                }
+          ) {
+            Text(
+              stringResource(R.string.model_list_shelf_models_title),
+              color = MaterialTheme.colorScheme.onSurface,
+              style = MaterialTheme.typography.labelLarge,
+            )
+            if (liveListState.status.isNotEmpty()) {
+              Text(
+                liveListState.status,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(top = 4.dp),
+              )
+            }
+          }
+        }
+      }
+      items(items = shelfModels, key = { "shelf_${it.name}" }) { model ->
+        Column(
+          modifier =
+            Modifier.graphicsLayer {
+              alpha = modelListProgress
+              translationY = (CONTENT_ANIMATION_OFFSET * (1 - modelListProgress)).toPx()
+            }
+        ) {
+          ModelItem(
+            model = model,
+            task = task,
+            modelManagerViewModel = modelManagerViewModel,
+            onModelClicked = onModelClicked,
+            onBenchmarkClicked = onBenchmarkClicked,
+            isBenchmarkSupported = model.supportModelBenchmark,
+          )
+          liveListState.notes[model.name]?.let { note ->
+            Text(
+              note,
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+              style = MaterialTheme.typography.bodySmall,
+              modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+            )
+          }
         }
       }
 

@@ -28,6 +28,38 @@ import com.google.ai.edge.gallery.BuildConfig
  */
 val DEEP_LINK_SCHEME: String = BuildConfig.APPLICATION_ID
 
+/**
+ * The LiteRT-LM version this build links (`litertlm` in gradle/libs.versions.toml). A model file
+ * whose `min_runtime_version` is newer needs an app update; see [needsNewerRuntime].
+ */
+val LITERT_LM_RUNTIME_VERSION: String = BuildConfig.LITERTLM_VERSION
+
+/**
+ * Whether a file that declares [minRuntimeVersion] (e.g. "0.19.0") needs a newer LiteRT-LM than
+ * [appVersion]. Versions compare by their numeric dot-separated parts; a pre-release suffix such as
+ * "-alpha1" is ignored. An empty or unreadable [minRuntimeVersion] never needs a newer one.
+ */
+fun needsNewerRuntime(
+  minRuntimeVersion: String?,
+  appVersion: String = LITERT_LM_RUNTIME_VERSION,
+): Boolean {
+  val wanted = parseRuntimeVersion(minRuntimeVersion) ?: return false
+  val have = parseRuntimeVersion(appVersion) ?: return false
+  for (i in 0 until maxOf(wanted.size, have.size)) {
+    val w = wanted.getOrElse(i) { 0 }
+    val h = have.getOrElse(i) { 0 }
+    if (w != h) return w > h
+  }
+  return false
+}
+
+private fun parseRuntimeVersion(version: String?): List<Int>? {
+  val core = version?.trim()?.removePrefix("v")?.substringBefore('-')?.substringBefore('+')
+  if (core.isNullOrEmpty()) return null
+  val parts = core.split('.').map { it.toIntOrNull() ?: return null }
+  return parts.ifEmpty { null }
+}
+
 // Keys used to send/receive data to Work.
 const val KEY_MODEL_URL = "KEY_MODEL_URL"
 const val KEY_MODEL_NAME = "KEY_MODEL_NAME"

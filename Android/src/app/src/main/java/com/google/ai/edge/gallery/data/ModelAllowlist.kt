@@ -125,6 +125,8 @@ data class AllowedModel(
    * [DeviceRequirementSets.AICORE_LLM].
    */
   val deviceRequirement: String? = null,
+  /** The name shown in the model list; the shelf (live list) sets it, the JSON allowlist does not. */
+  val displayName: String? = null,
 ) {
   /**
    * The device-requirement set this model needs, falling back to [DeviceRequirementSets.AICORE_LLM]
@@ -321,6 +323,7 @@ data class AllowedModel(
     return Model(
       name = name,
       modelId = modelId,
+      displayName = displayName.orEmpty(),
       info = finalDescription,
       minDeviceMemoryInGb = minDeviceMemoryInGb,
       configs = configs,

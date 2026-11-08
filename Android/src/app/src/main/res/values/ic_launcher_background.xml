@@ -14,7 +14,7 @@
  See the License for the specific language governing permissions and
  limitations under the License.
 -->
-
+<!-- Modified for Model Shelf (2026-11-08): replaced with an original shelf drawing; no Google artwork. -->
 <resources>
-    <color name="ic_launcher_background">#ffffff</color>
+  <color name="ic_launcher_background">#FF263238</color>
 </resources>

@@ -19,8 +19,9 @@ lifecycleProcess = "2.8.7"
 webkit = "1.14.0"
 protobuf = "0.10.0"
 protobufJavaLite = "4.26.1"
-#noinspection GradleDependency
-litertlm = "0.18.1"
+# The app reads this version at run time (BuildConfig.LITERTLM_VERSION) to compare with each
+# model file's min_runtime_version, so this line is the only place to change it.
+litertlm = "0.19.1"
 commonmark = "1.0.0-alpha02"
 richtext = "1.0.0-alpha02"
 cameraX = "1.4.2"

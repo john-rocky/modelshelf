@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Model Shelf: no usage logs leave the app.
+
+  Libraries the app keeps for their features still carry Google usage-logging clients:
+  - MediaPipe Tasks 1.2.0 (tasks-vision / tasks-audio / tasks-retrieval) posts from native code
+    (clearcut_logging_client.cc, through java.net.HttpURLConnection) to https://play.googleapis.com/log.
+  - The Google datatransport CCT backend (MediaPipe's RemoteLoggingClient, ML Kit) posts to
+    firebaselogging.googleapis.com and firebaselogging-pa.googleapis.com.
+  These hosts are pinned to a key no certificate has, so the TLS handshake fails before any
+  request is written. The app itself never needs them (models come from huggingface.co, the
+  Google allowlist from raw.githubusercontent.com).
+
+  A pin-set without an expiration attribute never expires. Keep this file and
+  src/debug/res/xml/network_security_config.xml in step.
+-->
+<network-security-config>
+  <domain-config>
+    <domain includeSubdomains="false">play.googleapis.com</domain>
+    <domain includeSubdomains="false">firebaselogging.googleapis.com</domain>
+    <domain includeSubdomains="false">firebaselogging-pa.googleapis.com</domain>
+    <pin-set>
+      <!-- SHA-256 of nothing real: 32 zero bytes. -->
+      <pin digest="SHA-256">AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=</pin>
+    </pin-set>
+  </domain-config>
+</network-security-config>

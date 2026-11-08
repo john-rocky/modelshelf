@@ -19,7 +19,7 @@ package com.google.ai.edge.gallery.services.tts
 import java.util.Locale
 
 /**
- * Translated sample phrases for `"Welcome to AI Edge Gallery"` spoken when previewing a TTS voice
+ * Translated sample phrases for `"Welcome to Model Shelf"` spoken when previewing a TTS voice
  * profile.
  *
  * Unlike UI strings resolved against the device's system locale (`context.getString`), voice
@@ -31,41 +31,42 @@ import java.util.Locale
 object TtsVoicePreviewPhrases {
 
   /** Default English preview phrase. */
-  const val DEFAULT_PREVIEW_TEXT = "Welcome to AI Edge Gallery"
+  const val DEFAULT_PREVIEW_TEXT = "Welcome to Model Shelf"
 
   /**
    * Translated preview phrases keyed by lowercase ISO 639-1 primary language subtag.
    *
-   * For non-Latin-script languages (`ar`, `hi`, `ja`, `ko`, `ru`, `zh`), `"AI Edge Gallery"` is
+   * For non-Latin-script languages (`ar`, `hi`, `ja`, `ko`, `ru`), `"Model Shelf"` is
    * transliterated into the target script so monolingual neural TTS phonemizers pronounce the
-   * product name naturally instead of dropping Latin characters.
+   * product name naturally instead of dropping Latin characters. Only the app-name words differ
+   * from the upstream phrases.
    */
   val phrasesByLanguageSubtag: Map<String, String> =
     mapOf(
-      "ar" to "مرحبًا بك في إيه آي إيدج غاليري",
-      "da" to "Velkommen til AI Edge Gallery",
-      "de" to "Willkommen bei AI Edge Gallery",
+      "ar" to "مرحبًا بك في موديل شيلف",
+      "da" to "Velkommen til Model Shelf",
+      "de" to "Willkommen bei Model Shelf",
       "en" to DEFAULT_PREVIEW_TEXT,
-      "es" to "Te damos la bienvenida a AI Edge Gallery",
-      "fr" to "Bienvenue dans AI Edge Gallery",
-      "hi" to "एआई एज गैलरी में आपका स्वागत है",
-      "id" to "Selamat datang di AI Edge Gallery",
-      "it" to "Ti diamo il benvenuto in AI Edge Gallery",
-      "ja" to "エーアイ エッジ ギャラリーへようこそ",
-      "ko" to "에이아이 엣지 갤러리에 오신 것을 환영합니다",
-      "nb" to "Velkommen til AI Edge Gallery",
-      "nl" to "Welkom bij AI Edge Gallery",
-      "no" to "Velkommen til AI Edge Gallery",
-      "pl" to "Witamy w AI Edge Gallery",
-      "pt" to "Boas-vindas ao AI Edge Gallery",
-      "ru" to "Добро пожаловать в Эй Ай Эдж Гэллери",
-      "sv" to "Välkommen till AI Edge Gallery",
-      "tr" to "AI Edge Gallery'ye hoş geldiniz",
-      "zh" to "欢迎使用 A I Edge Gallery",
+      "es" to "Te damos la bienvenida a Model Shelf",
+      "fr" to "Bienvenue dans Model Shelf",
+      "hi" to "मॉडल शेल्फ में आपका स्वागत है",
+      "id" to "Selamat datang di Model Shelf",
+      "it" to "Ti diamo il benvenuto in Model Shelf",
+      "ja" to "モデル シェルフへようこそ",
+      "ko" to "모델 셸프에 오신 것을 환영합니다",
+      "nb" to "Velkommen til Model Shelf",
+      "nl" to "Welkom bij Model Shelf",
+      "no" to "Velkommen til Model Shelf",
+      "pl" to "Witamy w Model Shelf",
+      "pt" to "Boas-vindas ao Model Shelf",
+      "ru" to "Добро пожаловать в Модел Шелф",
+      "sv" to "Välkommen till Model Shelf",
+      "tr" to "Model Shelf'e hoş geldiniz",
+      "zh" to "欢迎使用 Model Shelf",
     )
 
   /**
-   * Returns the translated `"Welcome to AI Edge Gallery"` sample phrase for [languageCode] (a
+   * Returns the translated `"Welcome to Model Shelf"` sample phrase for [languageCode] (a
    * BCP-47 tag such as `"fr-FR"` or ISO 639-1 code such as `"fr"`), falling back to [fallbackText]
    * when [languageCode] is null, blank, or not in [phrasesByLanguageSubtag].
    */

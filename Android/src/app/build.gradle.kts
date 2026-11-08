@@ -45,6 +45,8 @@ android {
     manifestPlaceholders["appIcon"] = "@mipmap/ic_launcher"
 
     buildConfigField("String", "FEEDBACK_API_KEY", "\"\"")
+    // The LiteRT-LM version the app links, compared with a model file's min_runtime_version.
+    buildConfigField("String", "LITERTLM_VERSION", "\"${libs.versions.litertlm.get()}\"")
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }

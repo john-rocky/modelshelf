@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Debug builds only: the same pins as src/main/res/xml/network_security_config.xml, plus
+  cleartext to the device's own loopback, so a test server reached through `adb reverse`
+  (e.g. one that answers the live-list call with HTTP 503) can stand in for huggingface.co.
+  Release builds keep cleartext off.
+-->
+<network-security-config>
+  <domain-config>
+    <domain includeSubdomains="false">play.googleapis.com</domain>
+    <domain includeSubdomains="false">firebaselogging.googleapis.com</domain>
+    <domain includeSubdomains="false">firebaselogging-pa.googleapis.com</domain>
+    <pin-set>
+      <!-- SHA-256 of nothing real: 32 zero bytes. -->
+      <pin digest="SHA-256">AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=</pin>
+    </pin-set>
+  </domain-config>
+  <domain-config cleartextTrafficPermitted="true">
+    <domain includeSubdomains="false">127.0.0.1</domain>
+    <domain includeSubdomains="false">localhost</domain>
+  </domain-config>
+</network-security-config>

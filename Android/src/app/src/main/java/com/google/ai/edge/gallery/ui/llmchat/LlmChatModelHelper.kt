@@ -29,6 +29,7 @@ import com.google.ai.edge.gallery.data.DEFAULT_MAX_TOKEN
 import com.google.ai.edge.gallery.data.DEFAULT_TEMPERATURE
 import com.google.ai.edge.gallery.data.DEFAULT_TOPK
 import com.google.ai.edge.gallery.data.DEFAULT_TOPP
+import com.google.ai.edge.gallery.data.LITERT_LM_RUNTIME_VERSION
 import com.google.ai.edge.gallery.data.Model
 import com.google.ai.edge.gallery.data.ModelCapability
 import com.google.ai.edge.gallery.data.THOUGHT_CHANNEL
@@ -146,6 +147,11 @@ object LlmChatModelHelper : LlmModelHelper {
         Accelerator.TPU -> Backend.NPU(nativeLibraryDir = context.applicationInfo.nativeLibraryDir)
       }
     Log.d(TAG, "Preferred backend: $preferredBackend")
+    Log.i(
+      TAG,
+      "LiteRT-LM $LITERT_LM_RUNTIME_VERSION: creating the engine for '${model.name}' on " +
+        "${model.currentAccelerator ?: Accelerator.GPU}, max tokens $maxTokens",
+    )
 
     val modelPath = model.getPath(context = context)
     val engineConfig =

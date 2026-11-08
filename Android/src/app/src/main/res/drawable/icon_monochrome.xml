@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Model Shelf mark: a shelf with model files on it (own drawing, D-614 round 3). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+  <path
+      android:fillColor="#FFFFFFFF"
+      android:pathData="M31,51H77Q78,51 78,52V53Q78,54 77,54H31Q30,54 30,53V52Q30,51 31,51Z" />
+  <path
+      android:fillColor="#FFFFFFFF"
+      android:pathData="M31,73H77Q78,73 78,74V75Q78,76 77,76H31Q30,76 30,75V74Q30,73 31,73Z" />
+  <path
+      android:fillColor="#FFFFFFFF"
+      android:pathData="M34,33H38Q39,33 39,34V50Q39,51 38,51H34Q33,51 33,50V34Q33,33 34,33Z" />
+  <path
+      android:fillColor="#FFFFFFFF"
+      android:pathData="M42,37H45Q46,37 46,38V50Q46,51 45,51H42Q41,51 41,50V38Q41,37 42,37Z" />
+  <path
+      android:fillColor="#FFFFFFFF"
+      android:pathData="M49,31H54Q55,31 55,32V50Q55,51 54,51H49Q48,51 48,50V32Q48,31 49,31Z" />
+  <path
+      android:fillColor="#FFFFFFFF"
+      android:pathData="M58,36H61Q62,36 62,37V50Q62,51 61,51H58Q57,51 57,50V37Q57,36 58,36Z" />
+  <path
+      android:fillColor="#FFFFFFFF"
+      android:pathData="M67,43H73Q74,43 74,44V50Q74,51 73,51H67Q66,51 66,50V44Q66,43 67,43Z" />
+  <path
+      android:fillColor="#FFFFFFFF"
+      android:pathData="M35,57H41Q42,57 42,58V72Q42,73 41,73H35Q34,73 34,72V58Q34,57 35,57Z" />
+  <path
+      android:fillColor="#FFFFFFFF"
+      android:pathData="M45,60H48Q49,60 49,61V72Q49,73 48,73H45Q44,73 44,72V61Q44,60 45,60Z" />
+  <path
+      android:fillColor="#FFFFFFFF"
+      android:pathData="M52,55H58Q59,55 59,56V72Q59,73 58,73H52Q51,73 51,72V56Q51,55 52,55Z" />
+  <path
+      android:fillColor="#FFFFFFFF"
+      android:pathData="M62,59H65Q66,59 66,60V72Q66,73 65,73H62Q61,73 61,72V60Q61,59 62,59Z" />
+  <path
+      android:fillColor="#FFFFFFFF"
+      android:pathData="M69,63H74Q75,63 75,64V72Q75,73 74,73H69Q68,73 68,72V64Q68,63 69,63Z" />
+</vector>
