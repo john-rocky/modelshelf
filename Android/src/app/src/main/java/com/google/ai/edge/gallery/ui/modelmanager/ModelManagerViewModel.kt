@@ -2202,6 +2202,8 @@ constructor(
           LiveListUiState(
             modelNames = shelfModels.map { it.name }.toSet(),
             notes = liveList?.notes.orEmpty(),
+            foldedNames = liveList?.folded.orEmpty().keys,
+            gatedRepos = liveList?.gatedRepos.orEmpty(),
             // Count what the list shows: files Google's allowlist already has are not repeated.
             status = liveList?.copy(models = shelfModels)?.statusLine().orEmpty(),
           )

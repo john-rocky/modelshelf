@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Model Shelf: no usage logs leave the app.
+  Model Shelf: the MediaPipe and Firebase usage-log endpoints below are blocked by certificate
+  pinning. The connection is still attempted (TCP and the TLS ClientHello, which names the host);
+  the handshake fails, so no HTTP request is sent.
 
   Libraries the app keeps for their features still carry Google usage-logging clients:
   - MediaPipe Tasks 1.2.0 (tasks-vision / tasks-audio / tasks-retrieval) posts from native code

@@ -185,6 +185,13 @@
     <item quantity="other">%d models available</item>
   </plurals>
   <string name="model_list_shelf_models_title" translatable="true" description="Section header in the model list for the models listed live from the litert-community organization on Hugging Face. [CHAR_LIMIT=60]">From litert-community on Hugging Face</string>
+  <string name="model_list_shelf_folded_title" translatable="true" description="Title of the folded part of the shelf: files not yet checked on a phone with their sampler, and models that keep state between conversations. %1$d is the number of files. [CHAR_LIMIT=80]">Folded: not checked on a phone, or a state model (%1$d)</string>
+  <string name="model_list_shelf_gated_title" translatable="true" description="Title of the folded list of gated Hugging Face repos. %1$d is the number of repos. [CHAR_LIMIT=60]">Gated on Hugging Face (%1$d)</string>
+  <string name="model_list_shelf_fold_open" translatable="true" description="Content description of the icon that opens a folded part of the shelf. [CHAR_LIMIT=20]">Show</string>
+  <string name="model_list_shelf_fold_close" translatable="true" description="Content description of the icon that closes a folded part of the shelf. [CHAR_LIMIT=20]">Hide</string>
+  <string name="model_list_shelf_gated_badge" translatable="true" description="Badge on a gated Hugging Face repo in the shelf. [CHAR_LIMIT=40]">Gated on Hugging Face</string>
+  <string name="model_list_shelf_gated_body" translatable="true" description="Why a gated repo has no download button. [CHAR_LIMIT=200]">Hugging Face lets you download it after you sign in and accept its conditions. Model Shelf has no Hugging Face sign-in yet, so it cannot download this repo.</string>
+  <string name="model_list_shelf_gated_link" translatable="true" description="Link that opens a gated repo's page on Hugging Face in the browser. [CHAR_LIMIT=40]">Open on Hugging Face</string>
   <string name="model_list_recommended_models_title" translatable="true" description="Section header in the model list for models recommended for download. [CHAR_LIMIT=31]">Recommended models</string>
   <string name="model_manager" translatable="true" description="Title of the screen where users can manage (download, delete, import) models. [CHAR_LIMIT=22]">Model Manager</string>
   <string name="model_manager_select_task_title" translatable="true" description="Header instructing the user to choose a specific task or use case to try with the models. [CHAR_LIMIT=40]">Select a use case to try</string>

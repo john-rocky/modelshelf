@@ -318,6 +318,17 @@ object LlmChatModelHelper : LlmModelHelper {
           temperature = temperature.toDouble(),
         )
       }
+    // Model Shelf: which sampler the conversation gets, to check a card's session_defaults on a
+    // phone (D-614 round 4).
+    Log.i(
+      TAG,
+      if (samplerConfig != null) {
+        "Sampler for '${model.name}' on $accelerator: top-k $topK, top-p $topP, " +
+          "temperature $temperature"
+      } else {
+        "Sampler for '${model.name}' on $accelerator: none set (the model file's own)"
+      },
+    )
     ExperimentalFlags.enableConversationConstrainedDecoding = enableConversationConstrainedDecoding
     return try {
       engine.createConversation(

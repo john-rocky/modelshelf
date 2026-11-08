@@ -24,10 +24,12 @@ package com.google.ai.edge.gallery.ui.modelmanager
 import androidx.compose.ui.platform.LocalContext
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -37,9 +39,13 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.Description
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.ExpandMore
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -48,7 +54,10 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -66,6 +75,7 @@ import com.google.ai.edge.gallery.data.BuiltInTaskId
 import com.google.ai.edge.gallery.data.Model
 import com.google.ai.edge.gallery.data.Task
 import com.google.ai.edge.gallery.data.supportModelBenchmark
+import com.google.ai.edge.gallery.huggingface.GatedRepo
 import com.google.ai.edge.gallery.ui.common.ClickableLink
 import com.google.ai.edge.gallery.ui.common.RevealingText
 import com.google.ai.edge.gallery.ui.common.TaskIcon
@@ -138,8 +148,16 @@ fun ModelList(
   val liveListState by modelManagerViewModel.liveListState.collectAsState()
   val galleryModels = models.filter { it.name !in liveListState.modelNames }
   val shelfModels = models.filter { it.name in liveListState.modelNames }
+  // Files checked on a phone with their sampler first; the rest and the gated repos are folded.
+  val shelfMain = shelfModels.filter { it.name !in liveListState.foldedNames }
+  val shelfFolded = shelfModels.filter { it.name in liveListState.foldedNames }
+  val shelfGated =
+    if (task.id == BuiltInTaskId.LLM_CHAT) liveListState.gatedRepos else emptyList()
+  var shelfFoldedOpen by rememberSaveable { mutableStateOf(false) }
+  var shelfGatedOpen by rememberSaveable { mutableStateOf(false) }
   val showShelfSection =
     shelfModels.isNotEmpty() ||
+      shelfGated.isNotEmpty() ||
       (task.id == BuiltInTaskId.LLM_CHAT && liveListState.status.isNotEmpty())
 
   val listState = rememberLazyListState()
@@ -234,30 +252,56 @@ fun ModelList(
           }
         }
       }
-      items(items = shelfModels, key = { "shelf_${it.name}" }) { model ->
-        Column(
+      items(items = shelfMain, key = { "shelf_${it.name}" }) { model ->
+        ShelfModelItem(
+          model = model,
+          note = liveListState.notes[model.name],
+          task = task,
+          modelManagerViewModel = modelManagerViewModel,
+          onModelClicked = onModelClicked,
+          onBenchmarkClicked = onBenchmarkClicked,
           modifier =
             Modifier.graphicsLayer {
               alpha = modelListProgress
               translationY = (CONTENT_ANIMATION_OFFSET * (1 - modelListProgress)).toPx()
-            }
-        ) {
-          ModelItem(
-            model = model,
-            task = task,
-            modelManagerViewModel = modelManagerViewModel,
-            onModelClicked = onModelClicked,
-            onBenchmarkClicked = onBenchmarkClicked,
-            isBenchmarkSupported = model.supportModelBenchmark,
+            },
+        )
+      }
+
+      // Folded: files not checked on a phone with their sampler, and state models.
+      if (shelfFolded.isNotEmpty()) {
+        item(key = "shelfFoldedTitle") {
+          ShelfFoldTitle(
+            title = stringResource(R.string.model_list_shelf_folded_title, shelfFolded.size),
+            open = shelfFoldedOpen,
+            onClick = { shelfFoldedOpen = !shelfFoldedOpen },
           )
-          liveListState.notes[model.name]?.let { note ->
-            Text(
-              note,
-              color = MaterialTheme.colorScheme.onSurfaceVariant,
-              style = MaterialTheme.typography.bodySmall,
-              modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+        }
+        if (shelfFoldedOpen) {
+          items(items = shelfFolded, key = { "shelf_folded_${it.name}" }) { model ->
+            ShelfModelItem(
+              model = model,
+              note = liveListState.notes[model.name],
+              task = task,
+              modelManagerViewModel = modelManagerViewModel,
+              onModelClicked = onModelClicked,
+              onBenchmarkClicked = onBenchmarkClicked,
             )
           }
+        }
+      }
+
+      // Folded: gated repos, each with a link to its page; this app cannot download them.
+      if (shelfGated.isNotEmpty()) {
+        item(key = "shelfGatedTitle") {
+          ShelfFoldTitle(
+            title = stringResource(R.string.model_list_shelf_gated_title, shelfGated.size),
+            open = shelfGatedOpen,
+            onClick = { shelfGatedOpen = !shelfGatedOpen },
+          )
+        }
+        if (shelfGatedOpen) {
+          items(items = shelfGated, key = { "shelf_gated_${it.id}" }) { repo -> GatedRepoItem(repo) }
         }
       }
 
@@ -310,6 +354,103 @@ fun ModelList(
             )
           )
           .align(Alignment.BottomCenter)
+    )
+  }
+}
+
+/** A shelf file: the regular model item and the line under it (check, defaults, version). */
+@Composable
+private fun ShelfModelItem(
+  model: Model,
+  note: String?,
+  task: Task,
+  modelManagerViewModel: ModelManagerViewModel,
+  onModelClicked: (Model) -> Unit,
+  onBenchmarkClicked: (Model) -> Unit,
+  modifier: Modifier = Modifier,
+) {
+  Column(modifier = modifier) {
+    ModelItem(
+      model = model,
+      task = task,
+      modelManagerViewModel = modelManagerViewModel,
+      onModelClicked = onModelClicked,
+      onBenchmarkClicked = onBenchmarkClicked,
+      isBenchmarkSupported = model.supportModelBenchmark,
+    )
+    note?.let {
+      Text(
+        it,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        style = MaterialTheme.typography.bodySmall,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+      )
+    }
+  }
+}
+
+/** The title of a folded part of the shelf; a tap opens or closes it. */
+@Composable
+private fun ShelfFoldTitle(title: String, open: Boolean, onClick: () -> Unit) {
+  Row(
+    verticalAlignment = Alignment.CenterVertically,
+    modifier =
+      Modifier.fillMaxWidth()
+        .clickable(onClick = onClick)
+        .padding(horizontal = 16.dp)
+        .padding(top = 24.dp, bottom = 8.dp),
+  ) {
+    Text(
+      title,
+      color = MaterialTheme.colorScheme.onSurface,
+      style = MaterialTheme.typography.labelLarge,
+      modifier = Modifier.weight(1f),
+    )
+    Icon(
+      if (open) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+      contentDescription =
+        stringResource(
+          if (open) R.string.model_list_shelf_fold_close else R.string.model_list_shelf_fold_open
+        ),
+      tint = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+  }
+}
+
+/** A gated repo: its name, the badge, why there is no download here, and a link to its page. */
+@Composable
+private fun GatedRepoItem(repo: GatedRepo) {
+  Column(
+    modifier =
+      Modifier.fillMaxWidth()
+        .background(
+          color = MaterialTheme.colorScheme.surfaceContainerLow,
+          shape = RoundedCornerShape(16.dp),
+        )
+        .padding(horizontal = 16.dp, vertical = 12.dp)
+  ) {
+    Text(
+      repo.id.substringAfter('/'),
+      color = MaterialTheme.colorScheme.onSurface,
+      style = MaterialTheme.typography.titleSmall,
+    )
+    Text(
+      stringResource(R.string.model_list_shelf_gated_badge),
+      color = MaterialTheme.colorScheme.tertiary,
+      style = MaterialTheme.typography.labelMedium,
+      modifier = Modifier.padding(top = 4.dp),
+    )
+    Text(
+      stringResource(R.string.model_list_shelf_gated_body),
+      color = MaterialTheme.colorScheme.onSurfaceVariant,
+      style = MaterialTheme.typography.bodySmall,
+      modifier = Modifier.padding(top = 4.dp),
+    )
+    ClickableLink(
+      url = repo.url,
+      linkText = stringResource(R.string.model_list_shelf_gated_link),
+      textAlign = TextAlign.Start,
+      modifier = Modifier.padding(top = 8.dp),
     )
   }
 }

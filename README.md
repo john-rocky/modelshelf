@@ -1,3 +1,12 @@
+# Model Shelf
+
+Model Shelf is a fork of [Google AI Edge Gallery](https://github.com/google-ai-edge/gallery) (Apache-2.0). It adds a shelf of the LiteRT-LM models that [litert-community](https://huggingface.co/litert-community) publishes on Hugging Face: the list is read live from Hugging Face, and each model's defaults come from its model card. Everything below "Google AI Edge Gallery" is the upstream README.
+
+## Usage logs and analytics
+
+- The MediaPipe and Firebase log endpoints are blocked by certificate pinning ([`network_security_config.xml`](Android/src/app/src/main/res/xml/network_security_config.xml)). Two libraries the app keeps still try to upload usage logs: MediaPipe Tasks to `play.googleapis.com/log`, and Google's datatransport library to `firebaselogging.googleapis.com` and `firebaselogging-pa.googleapis.com`. The connection is attempted and fails in the TLS handshake, so no HTTP request is sent to those hosts.
+- No analytics is configured: the app has no Firebase Analytics, and its analytics calls do nothing.
+
 # Google AI Edge Gallery ✨
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)

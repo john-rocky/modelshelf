@@ -21,6 +21,9 @@ import android.util.Log
 import com.google.ai.edge.gallery.BuildConfig
 import com.google.ai.edge.gallery.data.AllowedModel
 import com.google.ai.edge.gallery.data.BuiltInTaskId
+import com.google.ai.edge.gallery.data.DEFAULT_TEMPERATURE
+import com.google.ai.edge.gallery.data.DEFAULT_TOPK
+import com.google.ai.edge.gallery.data.DEFAULT_TOPP
 import com.google.ai.edge.gallery.data.DefaultConfig
 import com.google.ai.edge.gallery.data.LITERT_LM_RUNTIME_VERSION
 import com.google.ai.edge.gallery.data.ModelCapability
@@ -37,6 +40,7 @@ import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.abs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -54,11 +58,14 @@ import kotlinx.coroutines.withContext
  *    one reader serves both,
  * 3. the app's defaults (Gallery's sampler, CPU then GPU).
  * Rules decided by the D-614 window (2026-11-08):
- * - the first accelerator is the variant's `recommended[]` backend for platform android, else its
- *   `default_backend`, then the rest of `backends` in order,
+ * - the first accelerator is the backend of the variant's `recommended[]` row for this phone
+ *   (android, `soc` = Build.SOC_MODEL), else its `default_backend`, then the rest of `backends`,
  * - a file whose `min_runtime_version` is newer than the app's LiteRT-LM stays listed and says
  *   that it needs an app update,
- * - sampler values are taken as written; `session_defaults.source` names where they came from.
+ * - sampler values are taken as written; `session_defaults.source` names where they came from,
+ * - the main shelf lists a file only after a phone check with its sampler (a `checked[]` row for
+ *   android, at least 3 runs, the sampler the app will use); other files are folded below it with
+ *   the reason, and gated repos are folded with a link to their page (no download).
  */
 
 private const val TAG = "MSLiveList"
@@ -91,6 +98,9 @@ private const val MAX_DEFAULT_MAX_TOKENS = 4096
 private const val FALLBACK_MAX_TOKENS = 1024
 /** The Max tokens slider starts at 2000 (Config.kt); a smaller context gets a fixed value. */
 private const val MAX_TOKENS_SLIDER_MIN = 2000
+/** A `checked[]` row puts a file on the main shelf with at least this many runs (DESIGN §b-4). */
+private const val MIN_CHECK_RUNS = 3
+private const val SAMPLER_TOLERANCE = 1e-4f
 
 /** Card pipeline tags of chat models; a repo without a tag is kept unless it is an embedder. */
 private val CHAT_PIPELINE_TAGS =
@@ -116,11 +126,26 @@ enum class DefaultsSource(val label: String) {
   APP("the app's defaults"),
 }
 
+/** Why a shelf file is folded below the main shelf instead of listed in it (DESIGN §b-4). */
+enum class FoldReason(val badge: String) {
+  /** No android `checked[]` row with [MIN_CHECK_RUNS] runs and the sampler the app will use. */
+  NOT_CHECKED("Not checked on a phone"),
+  /** The model keeps state between conversations on one engine (`stateful`, DESIGN §b-5). */
+  STATE_MODEL("State model"),
+}
+
+/** A gated repo: listed with a link to its page; this app cannot download it (no sign-in). */
+data class GatedRepo(val id: String, val url: String)
+
 /** The result of one shelf load. */
 data class LiveListResult(
   val models: List<AllowedModel> = emptyList(),
   /** Per model name: the line shown under that model in the list. */
   val notes: Map<String, String> = emptyMap(),
+  /** Per model name of a folded file: why it is folded. Files not in it are on the main shelf. */
+  val folded: Map<String, FoldReason> = emptyMap(),
+  /** Gated repos, shown folded with a link; no download. */
+  val gatedRepos: List<GatedRepo> = emptyList(),
   val source: LiveListSource = LiveListSource.NONE,
   /** When the list on screen was fetched from Hugging Face (epoch ms), 0 if never. */
   val savedAtMs: Long = 0L,
@@ -136,6 +161,9 @@ data class LiveListResult(
 data class LiveListUiState(
   val modelNames: Set<String> = emptySet(),
   val notes: Map<String, String> = emptyMap(),
+  /** Shelf files folded below the main shelf (not checked on a phone, or a state model). */
+  val foldedNames: Set<String> = emptySet(),
+  val gatedRepos: List<GatedRepo> = emptyList(),
   val status: String = "",
 )
 
@@ -145,9 +173,12 @@ fun LiveListResult.statusLine(): String {
     if (savedAtMs > 0L) SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date(savedAtMs))
     else ""
   val counts = "${models.size} files from $repoCount repos"
+  val foldedCount = models.count { it.name in folded }
   val extras = buildList {
+    add("${models.size - foldedCount} checked on a phone")
+    if (foldedCount > 0) add("$foldedCount folded below")
+    if (gatedRepos.isNotEmpty()) add("${gatedRepos.size} gated repos folded below")
     if (needsUpdateCount > 0) add("$needsUpdateCount need a newer app")
-    if (gatedRepoCount > 0) add("$gatedRepoCount gated repos need a sign-in and are not listed")
     if (skippedRepoCount > 0) add("$skippedRepoCount repos could not be read")
   }
   val extraText = if (extras.isEmpty()) "" else " (" + extras.joinToString("; ") + ")"
@@ -215,13 +246,21 @@ class LiveListClient(private val cacheDir: File) {
         }
       }
 
+      // The recommended[] rows are matched by this value (decision 1 of 15:4x).
+      Log.i(
+        TAG,
+        "Shelf: this phone's Build.SOC_MODEL is '${Build.SOC_MODEL}' (matched as '$SOC'), " +
+          "Build.MODEL '${Build.MODEL}'",
+      )
       val shelfRepos = repos!!.filter { isShelfRepo(it) }
-      val gatedCount = shelfRepos.count { it.gated }
+      val gatedRepos =
+        shelfRepos.filter { it.gated }.map { GatedRepo(id = it.id, url = "$HF_BASE_URL/${it.id}") }
       val usable = shelfRepos.filter { !it.gated }
       val repoFiles = loadRepoFiles(usable, online)
 
       val models = mutableListOf<AllowedModel>()
       val notes = mutableMapOf<String, String>()
+      val folded = mutableMapOf<String, FoldReason>()
       var skipped = 0
       var shown = 0
       var needsUpdate = 0
@@ -234,10 +273,11 @@ class LiveListClient(private val cacheDir: File) {
         val converted = convertRepo(repo, files)
         if (converted.isEmpty()) continue
         shown++
-        for ((model, note, newer) in converted) {
-          models.add(model)
-          notes[model.name] = note
-          if (newer) needsUpdate++
+        for (entry in converted) {
+          models.add(entry.model)
+          notes[entry.model.name] = entry.note
+          entry.fold?.let { folded[entry.model.name] = it }
+          if (entry.newer) needsUpdate++
         }
       }
 
@@ -249,16 +289,19 @@ class LiveListClient(private val cacheDir: File) {
       Log.d(
         TAG,
         "Shelf: ${models.size} files from $shown repos, source ${if (online) "network" else "cache"}" +
-          ", gated $gatedCount, skipped $skipped, needs a newer app $needsUpdate",
+          ", main ${models.size - folded.size}, folded ${folded.size}, gated ${gatedRepos.size}" +
+          ", skipped $skipped, needs a newer app $needsUpdate",
       )
       LiveListResult(
         models = models,
         notes = notes,
+        folded = folded,
+        gatedRepos = gatedRepos,
         source = if (online) LiveListSource.NETWORK else LiveListSource.CACHE,
         savedAtMs = savedAtMs,
         networkError = if (online) null else networkError,
         repoCount = shown,
-        gatedRepoCount = gatedCount,
+        gatedRepoCount = gatedRepos.size,
         skippedRepoCount = skipped,
         needsUpdateCount = needsUpdate,
       )
@@ -325,8 +368,16 @@ class LiveListClient(private val cacheDir: File) {
     return RepoFiles(manifest = manifest, sizes = sizes, sha256s = sha256s)
   }
 
-  /** One shelf entry per file the device can use: the model, its note, needs a newer app. */
-  private fun convertRepo(repo: ListRepo, files: RepoFiles): List<Triple<AllowedModel, String, Boolean>> {
+  /** One shelf file: the model, the line under it, needs a newer app, why it is folded (or null). */
+  private data class ShelfEntry(
+    val model: AllowedModel,
+    val note: String,
+    val newer: Boolean,
+    val fold: FoldReason?,
+  )
+
+  /** One shelf entry per file the device can use. */
+  private fun convertRepo(repo: ListRepo, files: RepoFiles): List<ShelfEntry> {
     val defaultsSource =
       when {
         repo.block != null -> DefaultsSource.CARD
@@ -356,11 +407,11 @@ class LiveListClient(private val cacheDir: File) {
     val thinking = capabilities?.obj("thinking")?.bool("declared") == true
     val repoShort = repo.id.substringAfter('/')
 
-    val out = mutableListOf<Triple<AllowedModel, String, Boolean>>()
+    val out = mutableListOf<ShelfEntry>()
     for (file in shelfFiles) {
       val size = files.sizes[file] ?: continue
       val v = variantByFile[file]
-      val accelerators = acceleratorOrder(v)
+      val (accelerators, acceleratorWhy) = acceleratorOrder(v)
       // An NPU-only file built for one SoC (e.g. ..._sm8850...) only runs on that SoC.
       if (accelerators == listOf("npu")) {
         val socToken = SOC_TOKEN_REGEX.find(file.lowercase())?.groupValues?.get(1)
@@ -383,6 +434,13 @@ class LiveListClient(private val cacheDir: File) {
           (v?.arr("known_issues")?.strings() ?: emptyList()).any {
             it.contains("new Engine for each conversation", ignoreCase = true)
           }
+      val check = qualifyingCheck(v, topK, topP, temperature)
+      val fold =
+        when {
+          stateful -> FoldReason.STATE_MODEL
+          check == null -> FoldReason.NOT_CHECKED
+          else -> null
+        }
 
       val stem = file.substringAfterLast('/').removeSuffix(".litertlm")
       val label =
@@ -421,6 +479,17 @@ class LiveListClient(private val cacheDir: File) {
         append("Defaults from ${defaultsSource.label}. ")
         append("Accelerators: ${accelerators.joinToString(", ") { it.uppercase() }}. ")
         append(samplerText)
+        if (check != null) {
+          append(
+            "\n\nChecked on a phone with this sampler: ${checkText(check)}, LiteRT-LM " +
+              "${check.str("runtime") ?: "?"}, ${check.str("date") ?: "no date"}."
+          )
+        } else {
+          append(
+            "\n\nNot checked on a phone with this sampler yet, so it is folded below the main " +
+              "shelf."
+          )
+        }
         if (stateful) {
           append(
             "\n\nKnown issue: this model keeps state between conversations on one engine; " +
@@ -429,8 +498,16 @@ class LiveListClient(private val cacheDir: File) {
         }
       }
       val note =
-        if (newer) "Needs a newer app: LiteRT-LM $minRuntime (this app has $LITERT_LM_RUNTIME_VERSION)"
-        else "Defaults from ${defaultsSource.label}"
+        listOfNotNull(
+            if (newer) {
+              "Needs a newer app: LiteRT-LM $minRuntime (this app has $LITERT_LM_RUNTIME_VERSION)"
+            } else {
+              null
+            },
+            fold?.badge ?: check?.let { "Checked on ${checkText(it)}" },
+            "Defaults from ${defaultsSource.label}",
+          )
+          .joinToString(" · ")
 
       val model =
         AllowedModel(
@@ -459,38 +536,85 @@ class LiveListClient(private val cacheDir: File) {
           learnMoreUrl = "https://huggingface.co/${repo.id}",
           displayName = displayName,
         )
-      out.add(Triple(model, note, newer))
+      Log.d(
+        TAG,
+        "Shelf file '$name' (${defaultsSource.label}): accelerators $accelerators " +
+          "($acceleratorWhy), sampler top-k ${topK ?: "app"} top-p ${topP ?: "app"} " +
+          "temperature ${temperature ?: "app"}, " +
+          (fold?.let { "folded: ${it.badge}" } ?: "main shelf: checked on ${checkText(check!!)}"),
+      )
+      out.add(ShelfEntry(model = model, note = note, newer = newer, fold = fold))
     }
     return out
   }
 
   /**
-   * Decision 3: android's recommended backend first, else default_backend, then the rest. When a
-   * file has several android rows, the row whose device_class names this device (its Build.MODEL,
-   * e.g. "Pixel 11 Pro", or its SoC, e.g. "SM8850") wins; otherwise the first android row.
+   * The first `checked[]` row that puts a file on the main shelf (DESIGN §b-4 line 1): android, at
+   * least [MIN_CHECK_RUNS] runs, and the sampler the app will use for this file (the card's or
+   * manifest's session_defaults, the app's defaults for a key they do not name). A row without a
+   * sampler says nothing about one and does not count.
    */
-  private fun acceleratorOrder(variant: JsonObject?): List<String> {
+  private fun qualifyingCheck(
+    variant: JsonObject?,
+    topK: Int?,
+    topP: Float?,
+    temperature: Float?,
+  ): JsonObject? {
+    val useK = topK ?: DEFAULT_TOPK
+    val useP = topP ?: DEFAULT_TOPP
+    val useT = temperature ?: DEFAULT_TEMPERATURE
+    return variant?.arr("checked")?.objects()?.firstOrNull { row ->
+      row.str("os").equals("android", ignoreCase = true) &&
+        (row.int("runs") ?: 0) >= MIN_CHECK_RUNS &&
+        row.int("top_k") == useK &&
+        row.float("top_p")?.let { abs(it - useP) < SAMPLER_TOLERANCE } == true &&
+        row.float("temperature")?.let { abs(it - useT) < SAMPLER_TOLERANCE } == true
+    }
+  }
+
+  private fun checkText(row: JsonObject): String =
+    "${row.str("device") ?: "a phone"} (${(row.str("backend") ?: "?").uppercase()}, " +
+      "${row.int("runs") ?: 0} runs)"
+
+  /**
+   * The accelerator order of one file and why (decision 3 of 13:4x, decision 1 of 15:4x): the
+   * backend of the file's `recommended[]` row for this phone first, else `default_backend`, then
+   * the rest of `backends`. The row for this phone is the android row whose `soc` equals
+   * Build.SOC_MODEL (case ignored). A file with one android row that names no `soc` takes that
+   * row. Several android rows and none for this SoC (or one row for another SoC) = the rows are
+   * about other phones: `default_backend`, not the first row. `device_class` is text for people
+   * and is not read.
+   */
+  private fun acceleratorOrder(variant: JsonObject?): Pair<List<String>, String> {
     val known = setOf("cpu", "gpu", "npu")
     val androidRows =
       variant?.arr("recommended")?.objects()?.filter {
         it.str("platform").equals("android", ignoreCase = true)
       } ?: emptyList()
-    val deviceModel = (Build.MODEL ?: "").lowercase()
-    val thisDevice =
-      androidRows.firstOrNull { row ->
-        val deviceClass = row.str("device_class")?.lowercase() ?: ""
-        (deviceModel.isNotEmpty() && deviceClass.contains(deviceModel)) ||
-          (SOC.isNotEmpty() && deviceClass.contains(SOC))
+    val socRow =
+      if (SOC.isEmpty()) null
+      else androidRows.firstOrNull { it.str("soc")?.trim()?.lowercase() == SOC }
+    val defaultBackend = variant?.str("default_backend")
+    val (first, why) =
+      when {
+        socRow != null ->
+          socRow.str("backend") to "recommended row for soc ${socRow.str("soc")}"
+        androidRows.size == 1 && androidRows[0].str("soc").isNullOrBlank() ->
+          androidRows[0].str("backend") to "the one android recommended row"
+        androidRows.isNotEmpty() ->
+          defaultBackend to
+            "default_backend $defaultBackend: ${androidRows.size} android rows, none for soc '$SOC'"
+        else -> defaultBackend to "default_backend $defaultBackend: no android row"
       }
-    val recommended = (thisDevice ?: androidRows.firstOrNull())?.str("backend")
-    val first = (recommended ?: variant?.str("default_backend"))?.lowercase()
     val order = mutableListOf<String>()
-    if (first != null && first in known) order.add(first)
+    val firstLower = first?.lowercase()
+    if (firstLower != null && firstLower in known) order.add(firstLower)
     variant?.arr("backends")?.strings()?.forEach { b ->
       val lower = b.lowercase()
       if (lower in known && lower !in order) order.add(lower)
     }
-    return order.ifEmpty { listOf("cpu", "gpu") }
+    if (order.isEmpty()) return listOf("cpu", "gpu") to "no backends named: the app's CPU, GPU"
+    return order to why
   }
 
   private fun parseList(text: String): List<ListRepo>? {
