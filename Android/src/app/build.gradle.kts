@@ -108,6 +108,8 @@ dependencies {
   implementation(libs.hilt.navigation.compose)
   implementation(libs.play.services.oss.licenses)
   implementation(libs.androidx.exifinterface)
+  // SkillManager uses DocumentFile, which reached the app only through the Firebase libraries.
+  implementation("androidx.documentfile:documentfile:1.1.0")
   implementation(libs.moshi.kotlin)
   ksp(libs.hilt.android.compiler)
   ksp("org.jetbrains.kotlin:kotlin-metadata-jvm:2.4.0")
