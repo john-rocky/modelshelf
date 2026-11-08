@@ -55,7 +55,7 @@
   <string name="aichat_initializing_title" translatable="true" description="Status indicator when initializing model. [CHAR_LIMIT=31]">Initializing model</string>
   <string name="aichat_initializing_content" translatable="true" description="Loading message shown while a chat or translator session is initializing. [CHAR_LIMIT=110]">Sit tight, this can take up to 1 minute</string>
   <string name="app_intro" translatable="true" description="Introduction text shown on the home screen. [CHAR_LIMIT=90]">Explore a world of amazing on-device models from</string>
-  <string name="app_name" translatable="false">Google AI Edge Gallery</string>
+  <string name="app_name" translatable="false">Model Shelf</string>
   <string name="app_name_first_part" translatable="false">Google AI</string>
   <string name="app_name_second_part" translatable="false">Edge Gallery</string>
   <string name="askimage_emptystate_title" translatable="false">Ask Image</string>
@@ -243,9 +243,9 @@
   <string name="test" translatable="true" description="Button label or header for testing functionality. [CHAR_LIMIT=18]">Test</string>
   <string name="text_image_generation_text_field_placeholder" translatable="true" description="Placeholder hint in a text field for generating images from text prompts. [CHAR_LIMIT=30]">Type prompt…</string>
   <string name="text_input_placeholder_llm_chat" translatable="true" description="Placeholder hint in the chat message input field (e.g., 'Type prompt...'). [CHAR_LIMIT=30]">Type prompt…</string>
-  <string name="tos_dialog_title_app" translatable="true" description="Title of the onboarding Terms of Service dialog. [CHAR_LIMIT=45]">Welcome to Google AI Edge Gallery</string>
-  <!-- Body text of the Terms of Service dialog. Contains links to Google Terms of Service and Privacy Policy. -->
-  <string name="tos_dialog_body" translatable="true" description="Main legal and privacy text inside the Terms of Service dialog, including links to Google policies. [CHAR_LIMIT=997]">By using this app, you agree to the [Google Terms of Service](https://policies.google.com/terms?hl=en-US).\n\nThis app collects aggregated usage metrics to understand user engagement, such as error messages, app actions, IP inferred approximate location, OS version. This data is processed in accordance with the [Google Privacy Policy](https://policies.google.com/privacy?hl=en-US).\n\nYour use of each model is subject to the applicable model license terms.</string>
+  <string name="tos_dialog_title_app" translatable="true" description="Title of the onboarding Terms of Service dialog. [CHAR_LIMIT=45]">Welcome to Model Shelf</string>
+  <!-- Body text of the onboarding dialog. Says what the app is based on. -->
+  <string name="tos_dialog_body" translatable="true" description="Main text of the onboarding dialog: what the app is based on, and the model license note. [CHAR_LIMIT=997]">Model Shelf is based on [Google AI Edge Gallery](https://github.com/google-ai-edge/gallery) (Apache-2.0).\n\nYour use of each model is subject to the applicable model license terms.</string>
   <!-- Title of the Gemma Terms of Use dialog. -->
   <string name="tos_dialog_title_gemma" translatable="true" description="Title of the terms dialog specific to using Gemma models. [CHAR_LIMIT=31]">Gemma Terms of Use</string>
   <string name="tos_dialog_accept_and_continue_button_label" translatable="true" description="Button label to accept the app terms and proceed. [CHAR_LIMIT=30]">Accept &amp; continue</string>
@@ -906,9 +906,9 @@
   <string name="copy_url" translatable="true" description="Button label or accessibility action to copy model URL to clipboard. [CHAR_LIMIT=18]">Copy URL</string>
   <string name="url_copied" translatable="true" description="Toast message shown after model URL is copied to clipboard. [CHAR_LIMIT=45]">URL copied to clipboard</string>
   <string name="compatible_files_header" translatable="true" description="Header for compatible files section showing count. [CHAR_LIMIT=40]">Compatible Files (%1$d):</string>
-  <string name="compatible_files_subheader" translatable="true" description="Subheader explaining compatible model files. [CHAR_LIMIT=90]">LiteRT-LM files compatible with AI Edge Gallery.</string>
+  <string name="compatible_files_subheader" translatable="true" description="Subheader explaining compatible model files. [CHAR_LIMIT=90]">LiteRT-LM files compatible with Model Shelf.</string>
   <string name="other_files_header" translatable="true" description="Header for incompatible/other files section showing count. [CHAR_LIMIT=32]">Other Files (%1$d):</string>
-  <string name="other_files_subheader" translatable="true" description="Subheader explaining other model files. [CHAR_LIMIT=93]">Files that may not be compatible with AI Edge Gallery.</string>
+  <string name="other_files_subheader" translatable="true" description="Subheader explaining other model files. [CHAR_LIMIT=93]">Files that may not be compatible with Model Shelf.</string>
   <string name="incompatible_file_selection_prompt" translatable="true" description="Prompt shown when user taps an incompatible file. [CHAR_LIMIT=142]">This file may not be compatible. You can still copy the file URL to import it directly.</string>
   <string name="hf_no_model_files_in_card" translatable="true" description="Error message when no LiteRT model files are found in a Hugging Face repository card. [CHAR_LIMIT=100]">No LiteRT model files (.litertlm) found in this model card.</string>
   <string name="hf_last_updated" translatable="true" description="Label showing when a model was last updated. [CHAR_LIMIT=21]">Updated %1$s</string>

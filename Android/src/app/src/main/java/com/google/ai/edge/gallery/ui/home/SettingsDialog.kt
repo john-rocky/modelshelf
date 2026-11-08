@@ -154,6 +154,12 @@ fun SettingsDialog(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.offset(y = (-6).dp),
           )
+          Text(
+            "Based on Google AI Edge Gallery (Apache-2.0)",
+            style = labelSmallNarrow,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.offset(y = (-6).dp),
+          )
         }
 
         Column(
@@ -253,34 +259,6 @@ fun SettingsDialog(
               }
             }
           }
-
-            Row(
-              modifier = Modifier.fillMaxWidth().semantics(mergeDescendants = true) {},
-              verticalAlignment = Alignment.CenterVertically,
-              horizontalArrangement = Arrangement.SpaceBetween,
-            ) {
-              Column(
-                modifier = Modifier.weight(1f).padding(end = 16.dp),
-                verticalArrangement = Arrangement.spacedBy(2.dp),
-              ) {
-                Text(
-                  stringResource(R.string.settings_dialog_firebase_analytics_title),
-                  style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Medium),
-                )
-                Text(
-                  stringResource(R.string.settings_dialog_firebase_analytics_description),
-                  style = MaterialTheme.typography.bodySmall,
-                  color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-              }
-              Switch(
-                checked = selectedFirebaseAnalytics,
-                onCheckedChange = { checked ->
-                  selectedFirebaseAnalytics = checked
-                  modelManagerViewModel.saveFirebaseAnalytics(checked)
-                },
-              )
-            }
 
           // HF Token management.
           Column(

@@ -987,7 +987,7 @@ open class SmartAlbumViewModel(
       app.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
 
     val channelId = "ai_edge_gallery_notification_channel"
-    val channelName = "AI Edge Gallery Notifications"
+    val channelName = "Model Shelf Notifications"
 
     val channel = NotificationChannel(channelId, channelName, NotificationManager.IMPORTANCE_HIGH)
     notificationManager.createNotificationChannel(channel)

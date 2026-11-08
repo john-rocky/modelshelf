@@ -26,6 +26,7 @@ import android.provider.CalendarContract.Instances
 import android.util.Log
 import androidx.core.content.ContextCompat.checkSelfPermission
 import androidx.core.net.toUri
+import com.google.ai.edge.gallery.data.DEEP_LINK_SCHEME
 import com.google.ai.edge.gallery.notifications.NotificationScheduleManagerEntryPoint
 import com.google.ai.edge.gallery.proto.ScheduledNotification
 import com.squareup.moshi.JsonClass
@@ -314,7 +315,7 @@ object IntentHandler {
           notificationProtoBuilder.setDeeplink(params.deeplink)
         } else if (params.task_id != null && params.model_name != null) {
           val uri =
-            "com.google.ai.edge.gallery://model/${params.task_id}/${params.model_name}"
+            "$DEEP_LINK_SCHEME://model/${params.task_id}/${params.model_name}"
               .toUri()
               .buildUpon()
               .appendQueryParameter("query", params.message)
@@ -324,7 +325,7 @@ object IntentHandler {
           notificationProtoBuilder.setDeeplink(uri)
         } else if (params.task_id != null) {
           val uri =
-            "com.google.ai.edge.gallery://${params.task_id}/"
+            "$DEEP_LINK_SCHEME://${params.task_id}/"
               .toUri()
               .buildUpon()
               .appendQueryParameter("query", params.message)
@@ -334,7 +335,7 @@ object IntentHandler {
           notificationProtoBuilder.setDeeplink(uri)
         } else {
           val fallbackUri =
-            "com.google.ai.edge.gallery://llm_agent_chat/"
+            "$DEEP_LINK_SCHEME://llm_agent_chat/"
               .toUri()
               .buildUpon()
               .appendQueryParameter("query", params.message)

@@ -19,6 +19,14 @@ package com.google.ai.edge.gallery.data
 import android.os.Build
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.google.ai.edge.gallery.BuildConfig
+
+/**
+ * The scheme of this app's deep links. It is the applicationId, the same string the VIEW
+ * intent-filter in AndroidManifest.xml declares (`${applicationId}`), so a renamed build never
+ * opens another app that is installed beside it.
+ */
+val DEEP_LINK_SCHEME: String = BuildConfig.APPLICATION_ID
 
 // Keys used to send/receive data to Work.
 const val KEY_MODEL_URL = "KEY_MODEL_URL"

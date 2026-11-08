@@ -17,35 +17,12 @@
 package com.google.ai.edge.gallery
 
 import android.os.Bundle
-import android.util.Log
 import androidx.annotation.VisibleForTesting
-import com.google.firebase.Firebase
-import com.google.firebase.analytics.FirebaseAnalytics
-import com.google.firebase.analytics.analytics
-
-private const val TAG = "AGAnalyticsFirebase"
 
 /**
- * The [FirebaseAnalytics] instance, or `null` if Firebase Analytics is not available.
- *
- * Resolved once on first access.
- */
-private val firebaseAnalyticsDelegate: FirebaseAnalytics? by lazy {
-  runCatching { Firebase.analytics }
-    .onFailure { exception ->
-      // Firebase.analytics can throw an exception if goolgle-services is not set up, e.g.,
-      // missing google-services.json.
-      Log.w(TAG, "Firebase Analytics is not available", exception)
-    }
-    .getOrNull()
-}
-
-/**
- * Thin wrapper around [FirebaseAnalytics] exposing the subset of its API used by the app.
- *
- * [FirebaseAnalytics] is a final class that is unavailable in Robolectric unit tests, so tests set
- * [eventHandler] or [galleryEventSinkForTesting] to intercept and verify logged events and their
- * parameters instead.
+ * The app's analytics entry point. Model Shelf has no Firebase: events go only to the handlers
+ * that tests set ([eventHandler], [galleryEventSinkForTesting]); otherwise nothing is logged or
+ * sent. The API is kept so the call sites stay as they are upstream.
  */
 object GalleryAnalytics {
   /**
@@ -73,7 +50,6 @@ object GalleryAnalytics {
       handler(name, params)
       return
     }
-    firebaseAnalyticsDelegate?.logEvent(name, params)
   }
 
   /**
@@ -89,20 +65,16 @@ object GalleryAnalytics {
     firebaseAnalytics?.logEvent(name, params)
   }
 
-  /** Enables or disables Firebase Analytics collection for this app. */
-  fun setAnalyticsCollectionEnabled(enabled: Boolean) {
-    firebaseAnalyticsDelegate?.setAnalyticsCollectionEnabled(enabled)
-  }
+  /** Kept for the call sites; there is no analytics collection to enable. */
+  @Suppress("UNUSED_PARAMETER") fun setAnalyticsCollectionEnabled(enabled: Boolean) {}
 }
 
 /**
- * Returns [GalleryAnalytics] if events can be logged, i.e. when [GalleryAnalytics.eventHandler] is
- * set or Firebase Analytics is available, or `null` otherwise.
+ * Returns [GalleryAnalytics] when a test has set [GalleryAnalytics.eventHandler], or `null`
+ * otherwise (always in the app: it has no analytics backend).
  */
 val firebaseAnalytics: GalleryAnalytics?
-  get() = GalleryAnalytics.takeIf {
-    GalleryAnalytics.eventHandler != null || firebaseAnalyticsDelegate != null
-  }
+  get() = GalleryAnalytics.takeIf { GalleryAnalytics.eventHandler != null }
 
 enum class GalleryEvent(val id: String) {
   CAPABILITY_SELECT(id = "capability_select"),

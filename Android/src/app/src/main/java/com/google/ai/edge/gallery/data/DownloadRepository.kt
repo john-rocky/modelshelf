@@ -743,7 +743,7 @@ class DefaultDownloadRepository(
     }
 
     val channelId = "download_notification"
-    val channelName = "AI Edge Gallery download notification"
+    val channelName = "Model Shelf download notification"
 
     // Create the NotificationChannel, but only on API 26+ because
     // the NotificationChannel class is new and not in the support library
@@ -762,13 +762,13 @@ class DefaultDownloadRepository(
           }
         // Download from global model manager. Open the global model manager screen.
         taskId == DOWNLOAD_FROM_GLOBAL_MODEL_MANAGER_TASK_ID ->
-          Intent(Intent.ACTION_VIEW, "com.google.ai.edge.gallery://global_model_manager".toUri())
+          Intent(Intent.ACTION_VIEW, "$DEEP_LINK_SCHEME://global_model_manager".toUri())
             .apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK }
         // Otherwise, create the deep link as before.
         else ->
           Intent(
               Intent.ACTION_VIEW,
-              "com.google.ai.edge.gallery://model/$taskId/${modelName}".toUri(),
+              "$DEEP_LINK_SCHEME://model/$taskId/${modelName}".toUri(),
             )
             .apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK }
       }

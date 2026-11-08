@@ -57,7 +57,6 @@ import com.google.ai.edge.gallery.ui.modelmanager.ModelManagerViewModel
 import com.google.ai.edge.gallery.ui.theme.GalleryTheme
 import com.google.ai.edge.litertlm.ExperimentalApi
 import com.google.ai.edge.litertlm.ExperimentalFlags
-import com.google.firebase.analytics.FirebaseAnalytics
 import dagger.hilt.android.AndroidEntryPoint
 import java.util.concurrent.CopyOnWriteArraySet
 import kotlinx.coroutines.delay
@@ -235,7 +234,7 @@ class MainActivity : ComponentActivity(), VirtualDevicePermissionsHost {
     super.onResume()
 
     firebaseAnalytics?.logEvent(
-      FirebaseAnalytics.Event.APP_OPEN,
+      "app_open",
       bundleOf(
         "app_version" to BuildConfig.VERSION_NAME,
         "app_platform" to "Android",
