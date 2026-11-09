@@ -25,7 +25,7 @@ import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 
 /*
- * The request side of Model Shelf's local API (DESIGN.md §g-2, §g-3): the Ollama and OpenAI
+ * The request side of Model Shelf's local API: the Ollama and OpenAI
  * request bodies read into one form, and the rules that need no Android class (the sampler order,
  * whether a request continues the conversation the engine holds, keep_alive). Kept free of Android
  * classes so the unit tests run on the computer.
@@ -34,7 +34,7 @@ import com.google.gson.JsonParser
 /** How long a model stays loaded after its last request when the request names no keep_alive. */
 const val DEFAULT_KEEP_ALIVE_MS = 5 * 60 * 1000L
 
-/** The longest a request may run when the model's card names no request_timeout_s (DESIGN §g-3). */
+/** The longest a request may run when the model's card names no request_timeout_s. */
 const val DEFAULT_REQUEST_TIMEOUT_S = 300
 
 /** The output budget when neither the request nor the card names one. */
@@ -113,7 +113,7 @@ data class ApiModelEntry(
   val maxNumTokens: Int,
   val contextLength: Int?,
   val sampler: SamplerDefaults,
-  /** The model keeps state between conversations on one engine (LiteRT-LM #3165, DESIGN §b-5). */
+  /** The model keeps state between conversations on one engine (LiteRT-LM #3165). */
   val stateful: Boolean,
   val statefulWhy: String?,
   val requestTimeoutS: Int?,
@@ -139,7 +139,7 @@ data class SamplerDefaults(
 /** One sampler value and where it came from. */
 data class Setting<T>(val value: T, val source: String)
 
-/** The sampler a request runs with, each value with its source (DESIGN §g-3, row 3). */
+/** The sampler a request runs with, each value with its source. */
 data class ResolvedSampler(
   val topK: Setting<Int>,
   val topP: Setting<Double>,
@@ -173,7 +173,7 @@ data class ResolvedSampler(
 }
 
 /**
- * The sampler order of DESIGN §g-3: the request, then the model's list entry (card, manifest or
+ * The sampler order: the request, then the model's list entry (card, manifest or
  * Google's list), then the app's defaults. A temperature of 0 asks for greedy decoding (top-k 1).
  */
 fun resolveSampler(request: SamplerRequest, defaults: SamplerDefaults, npu: Boolean): ResolvedSampler {
@@ -215,8 +215,8 @@ sealed class TurnPlan {
 
 /**
  * Whether [turns] continue the conversation the engine holds ([held] = its messages and its own
- * replies, or null when it holds none). Only an exact repeat plus one user message continues
- * (DESIGN §g-3, row 1); anything else starts a new conversation.
+ * replies, or null when it holds none). Only an exact repeat plus one user message continues;
+ * anything else starts a new conversation.
  */
 fun planTurn(held: List<ChatTurn>?, turns: List<ChatTurn>): TurnPlan {
   val last = turns.lastOrNull() ?: throw ApiError(400, "Send at least one message.")
@@ -238,6 +238,23 @@ fun resolveMaxOutputTokens(requested: Int?, cardMin: Int?, engineMax: Int): Int 
   val wanted = requested ?: maxOf(cardMin ?: 0, DEFAULT_MAX_OUTPUT_TOKENS)
   return wanted.coerceIn(1, maxOf(1, engineMax))
 }
+
+/**
+ * The engine size (prompt and output tokens together) for Ollama's options.num_ctx: at most the
+ * model's max tokens (the app's setting for the file, and the model's own context length when the
+ * list gives one), so a request cannot make an engine bigger than the app would.
+ */
+fun resolveEngineTokens(numCtx: Int?, maxNumTokens: Int, contextLength: Int?): Int {
+  val cap = maxOf(1, minOf(maxNumTokens, contextLength ?: maxNumTokens))
+  return (numCtx ?: cap).coerceIn(1, cap)
+}
+
+/** An engine made for [loadedTokens] serves a request that needs [wantedTokens] without a reload. */
+fun engineServes(loadedTokens: Int, wantedTokens: Int): Boolean = loadedTokens >= wantedTokens
+
+/** A client's text made safe for a response header: letters, digits and ._- only, at most 64 each. */
+fun headerSafe(values: List<String>): String =
+  values.joinToString(",") { v -> v.filter { it in 'a'..'z' || it in 'A'..'Z' || it in '0'..'9' || it in "._-" }.take(64) }
 
 /**
  * Finds a model by the name a request gives: the exact API name, the same ignoring case, without

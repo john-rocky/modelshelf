@@ -32,7 +32,7 @@ import io.ktor.server.engine.applicationEnvironment
 import io.ktor.server.engine.connector
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.request.header
-import io.ktor.server.request.receiveText
+import io.ktor.server.request.receiveChannel
 import io.ktor.server.response.header
 import io.ktor.server.response.respondBytesWriter
 import io.ktor.server.response.respondText
@@ -44,18 +44,22 @@ import io.ktor.utils.io.ByteWriteChannel
 import io.ktor.utils.io.writeStringUtf8
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 
 private const val TAG = "MSApiServer"
 
-/** SSE comment lines while an OpenAI stream waits for text (DESIGN §g-3, row 2). */
+/** SSE comment lines while an OpenAI stream waits for text. */
 private const val SSE_KEEP_ALIVE_MS = 10_000L
 
 /** Debug builds only: keep a stateful model's used engine, to show what the restart prevents. */
 private const val DEBUG_REUSE_HEADER = "X-ModelShelf-Debug-Reuse-Engine"
 
 /**
- * The HTTP server of the local API (DESIGN.md §g-2): Ollama's /api/ and OpenAI's /v1/ on
- * 127.0.0.1:11434, every call with an app's token. One line per request goes to logcat
+ * The HTTP server of the local API: Ollama's /api/ and OpenAI's /v1/ on 127.0.0.1:11434, every
+ * call with an app's token. One line per request goes to logcat
  * (tag MSApiServer): who asked, which model, the sampler and where each value came from, what
  * happened to the engine, and the times.
  */
@@ -67,8 +71,12 @@ class ApiServer(
   val catalog = ApiModelCatalog(context)
   val host = ApiEngineHost(context, onStateChanged)
   private val requestIds = AtomicLong(0)
+  private val bodies = BodyReader()
+  @Volatile
   private var server: EmbeddedServer<CIOApplicationEngine, CIOApplicationEngine.Configuration>? =
     null
+  /** Set when the stop begins: requests that arrive get a 503. */
+  @Volatile private var stopping = false
 
   val requestCount: Long
     get() = requestIds.get()
@@ -93,13 +101,21 @@ class ApiServer(
     Log.i(TAG, "Listening on ${LocalApi.BASE_URL} (loopback only)")
   }
 
-  /** Stops answering, unloads the model and closes the port. */
-  suspend fun stop() {
-    host.shutdown()
-    server?.stop(500, 2_000)
-    server = null
-    Log.i(TAG, "Stopped")
-  }
+  /**
+   * Stops, in this order: requests that arrive get a 503 and the answer that runs is stopped; the
+   * port closes (requests still open are cancelled); then, once the turn that runs has ended, the
+   * model is unloaded and the engine's thread ends. Not cancellable.
+   */
+  suspend fun stop() =
+    withContext(NonCancellable) {
+      stopping = true
+      host.beginShutdown()
+      val s = server
+      server = null
+      withContext(Dispatchers.IO) { s?.stop(500, 2_000) }
+      host.shutdown()
+      Log.i(TAG, "Stopped")
+    }
 
   private fun Application.routes() {
     routing {
@@ -230,14 +246,15 @@ class ApiServer(
         call.response.header("X-ModelShelf-Sampler", prepared.sampler.header())
         call.response.header("X-ModelShelf-Backend", prepared.loaded.backend)
         if (request.ignored.isNotEmpty()) {
-          call.response.header("X-ModelShelf-Not-Applied", request.ignored.joinToString(","))
+          call.response.header("X-ModelShelf-Not-Applied", headerSafe(request.ignored))
         }
         val running = host.start(prepared, maxOutput, timeoutS * 1000L)
-        val r: ApiEngineHost.Result
+        val r: AnswerResult
         try {
           r = answer(call, request, entry, running, timeoutS * 1000L, arrived, queueMs, prepared)
         } catch (t: Throwable) {
-          // The caller went away or the call was cancelled: end the turn, drop the conversation.
+          // The caller went away or the call was cancelled: finish() stops the generation if it
+          // still runs, then drops the conversation.
           host.finish(running, null, request.turns)
           throw t
         }
@@ -277,10 +294,10 @@ class ApiServer(
     arrived: Long,
     queueMs: Long,
     prepared: ApiEngineHost.Prepared,
-  ): ApiEngineHost.Result {
+  ): AnswerResult {
     val model = entry.name
     val generate = request.dialect == Dialect.OLLAMA_GENERATE
-    fun stats(r: ApiEngineHost.Result, promptTokens: Int?) =
+    fun stats(r: AnswerResult, promptTokens: Int?) =
       TurnStats(
         loadMs = prepared.loadMs,
         queueMs = queueMs,
@@ -290,14 +307,14 @@ class ApiServer(
         evalChunks = r.chunks,
         promptTokens = promptTokens,
       )
-    fun finishReason(r: ApiEngineHost.Result, maxOut: Int) = if (r.chunks >= maxOut) "length" else "stop"
+    fun finishReason(r: AnswerResult, maxOut: Int) = if (r.chunks >= maxOut) "length" else "stop"
     val maxOut =
       resolveMaxOutputTokens(request.maxOutputTokens, entry.maxOutputTokensMin, prepared.loaded.maxNumTokens)
 
     if (!request.stream) {
       val r = host.pump(running, timeoutMs, null, onText = {}, onIdle = null)
       when (r.end) {
-        ApiEngineHost.End.DONE -> {
+        AnswerEnd.DONE -> {
           val body =
             if (request.dialect == Dialect.OPENAI_CHAT) {
               ApiJson.openAiCompletion(
@@ -312,7 +329,7 @@ class ApiServer(
             }
           call.respondJson(HttpStatusCode.OK, body)
         }
-        ApiEngineHost.End.TIMEOUT ->
+        AnswerEnd.TIMEOUT ->
           respondError(call, ApiError(504, r.error ?: "Time limit reached."), request.dialect == Dialect.OPENAI_CHAT)
         else ->
           respondError(
@@ -327,14 +344,16 @@ class ApiServer(
     if (request.dialect == Dialect.OPENAI_CHAT) {
       val id = "chatcmpl-" + UUID.randomUUID().toString().replace("-", "")
       val created = System.currentTimeMillis() / 1000
-      var result: ApiEngineHost.Result? = null
+      var result: AnswerResult? = null
       call.respondBytesWriter(contentType = ContentType.Text.EventStream, status = HttpStatusCode.OK) {
-        sse(ApiJson.openAiChunk(id, model, created, ApiJson.roleDelta(), null))
         val r =
           host.pump(
             running,
             timeoutMs,
             SSE_KEEP_ALIVE_MS,
+            // The first write meets a client that left while it waited: inside pump, so the
+            // generation is stopped.
+            onStart = { sse(ApiJson.openAiChunk(id, model, created, ApiJson.roleDelta(), null)) },
             onText = { sse(ApiJson.openAiChunk(id, model, created, ApiJson.textDelta(it), null)) },
             onIdle = {
               writeStringUtf8(": keep-alive\n\n")
@@ -342,19 +361,19 @@ class ApiServer(
             },
           )
         result = r
-        if (r.end == ApiEngineHost.End.DONE) {
+        if (r.end == AnswerEnd.DONE) {
           sse(ApiJson.openAiChunk(id, model, created, com.google.gson.JsonObject(), finishReason(r, maxOut)))
           if (request.includeUsage) sse(ApiJson.openAiUsageChunk(id, model, created, stats(r, null)))
           writeStringUtf8("data: [DONE]\n\n")
           flush()
-        } else if (r.end != ApiEngineHost.End.CLIENT_GONE) {
-          sse(ApiJson.openAiError(r.error ?: "The answer stopped.", if (r.end == ApiEngineHost.End.TIMEOUT) 504 else 500, null))
+        } else if (r.end != AnswerEnd.CLIENT_GONE) {
+          sse(ApiJson.openAiError(r.error ?: "The answer stopped.", if (r.end == AnswerEnd.TIMEOUT) 504 else 500, null))
         }
       }
-      return result ?: ApiEngineHost.Result("", -1, 0, 0, ApiEngineHost.End.CLIENT_GONE, "no stream")
+      return result ?: AnswerResult("", -1, 0, 0, AnswerEnd.CLIENT_GONE, "no stream")
     }
 
-    var result: ApiEngineHost.Result? = null
+    var result: AnswerResult? = null
     call.respondBytesWriter(contentType = NDJSON, status = HttpStatusCode.OK) {
       val r =
         host.pump(
@@ -368,15 +387,15 @@ class ApiServer(
           onIdle = null,
         )
       result = r
-      if (r.end == ApiEngineHost.End.DONE) {
+      if (r.end == AnswerEnd.DONE) {
         writeStringUtf8(ApiJson.ollamaDone(model, generate, "", finishReason(r, maxOut), stats(r, null)) + "\n")
         flush()
-      } else if (r.end != ApiEngineHost.End.CLIENT_GONE) {
+      } else if (r.end != AnswerEnd.CLIENT_GONE) {
         writeStringUtf8(ApiJson.ollamaError(r.error ?: "The answer stopped.") + "\n")
         flush()
       }
     }
-    return result ?: ApiEngineHost.Result("", -1, 0, 0, ApiEngineHost.End.CLIENT_GONE, "no stream")
+    return result ?: AnswerResult("", -1, 0, 0, AnswerEnd.CLIENT_GONE, "no stream")
   }
 
   /** Ollama's /api/chat or /api/generate with no message: load, or unload with keep_alive 0. */
@@ -414,8 +433,12 @@ class ApiServer(
 
   // ---- Shared -------------------------------------------------------------------------------
 
-  /** The app a request comes from, checked before the body is read; null after a 401. */
+  /** The app a request comes from, checked before the body is read; null after a 401 or 503. */
   private suspend fun caller(call: ApplicationCall, openAi: Boolean): ApiTokenStore.Grant? {
+    if (stopping) {
+      respondError(call, ApiError(503, STOPPING_MESSAGE, "stopping"), openAi)
+      return null
+    }
     val auth = call.request.header(HttpHeaders.Authorization)
     val token =
       auth?.takeIf { it.startsWith("Bearer ", ignoreCase = true) }?.substring(7)?.trim()?.ifEmpty { null }
@@ -433,14 +456,21 @@ class ApiServer(
     return null
   }
 
-  private suspend fun readBody(call: ApplicationCall, openAi: Boolean): String? {
-    val length = call.request.header(HttpHeaders.ContentLength)?.toLongOrNull()
-    if (length != null && length > MAX_BODY_BYTES) {
-      respondError(call, ApiError(413, "The request body is larger than 4 MB."), openAi)
-      return null
-    }
+  /** A JSON body (UTF-8, RFC 8259) of at most [MAX_BODY_BYTES]; null after a 413 or 400. */
+  private suspend fun readBody(call: ApplicationCall, openAi: Boolean): String? =
+    readBodyBytes(call, MAX_BODY_BYTES, openAi)?.toString(Charsets.UTF_8)
+
+  /** The body's bytes, counted while they are read; null after a 413 or 400. */
+  private suspend fun readBodyBytes(call: ApplicationCall, limit: Long, openAi: Boolean): ByteArray? {
+    val declared = call.request.header(HttpHeaders.ContentLength)?.toLongOrNull()
     return try {
-      call.receiveText()
+      bodies.read(call.receiveChannel(), declared, limit)
+    } catch (e: ApiError) {
+      log("${call.request.local.method.value} ${call.request.local.uri}: ${e.status} ${e.message}")
+      respondError(call, e, openAi)
+      null
+    } catch (e: CancellationException) {
+      throw e
     } catch (e: Exception) {
       respondError(call, ApiError(400, "Could not read the request body."), openAi)
       null

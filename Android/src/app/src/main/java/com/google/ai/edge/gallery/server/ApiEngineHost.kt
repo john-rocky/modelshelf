@@ -29,6 +29,7 @@ import com.google.ai.edge.litertlm.EngineConfig
 import com.google.ai.edge.litertlm.Message
 import com.google.ai.edge.litertlm.MessageCallback
 import com.google.ai.edge.litertlm.SamplerConfig
+import java.io.File
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
@@ -38,30 +39,38 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 
 private const val TAG = "MSApiEngine"
 
-/** Requests that may wait behind the one that runs (DESIGN §g-3, "その他の決まり"). */
+/** Requests that may wait behind the one that runs (one answer at a time). */
 private const val MAX_WAITING = 4
 
-/** How long a stopped answer may take to end before the API gives up waiting for it. */
-private const val STOP_WAIT_MS = 15_000L
+/** While the stop waits for the turn that runs, one log line this often. */
+private const val STOP_LOG_EVERY_MS = 30_000L
+
+/** The answer to requests that arrive while the local API stops. */
+const val STOPPING_MESSAGE = "Model Shelf's local API is stopping."
 
 /**
  * The local API's engine: one LLM loaded at a time, one answer at a time, up to [MAX_WAITING]
- * requests waiting in arrival order (DESIGN §g-3).
+ * requests waiting in arrival order.
  *
- * State (constraint 1, LiteRT-LM #3165): the host keeps the conversation it holds and the messages
- * it has seen. A request that repeats them and adds one user message continues that conversation.
- * Any other request starts a new conversation; for a model that keeps state between conversations
- * on one engine (`stateful`), the engine is made again first, so no request sees another's state.
+ * State (LiteRT-LM #3165): the host keeps the conversation it holds and the messages it has seen.
+ * A request that repeats them and adds one user message continues that conversation. Any other
+ * request starts a new conversation; for a model that keeps state between conversations on one
+ * engine (`stateful`), the engine is made again first, so no request sees another's state.
+ *
+ * Stop: [beginShutdown] (no new turn; the answer that runs is asked to stop), then the server closes
+ * the port, then [shutdown] waits for the turn that runs, unloads the model and ends the host's
+ * thread and jobs. An engine that was being made when its request was cancelled is finished and
+ * closed, never dropped.
  */
 class ApiEngineHost(private val context: Context, private val onStateChanged: () -> Unit) {
   private val engineDispatcher =
@@ -71,8 +80,10 @@ class ApiEngineHost(private val context: Context, private val onStateChanged: ()
   private val inFlight = AtomicInteger(0)
   private var unloadJob: Job? = null
   @Volatile private var loaded: Loaded? = null
-  @Volatile private var active: Conversation? = null
+  @Volatile private var activeRun: AnswerRun? = null
   @Volatile private var averageTurnMs = 15_000L
+  /** Set when the server stops: no turn starts, and an engine made meanwhile is closed. */
+  @Volatile private var closing = false
   private val wakeLock: PowerManager.WakeLock =
     (context.getSystemService(Context.POWER_SERVICE) as PowerManager)
       .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ModelShelf:LocalApi")
@@ -83,6 +94,7 @@ class ApiEngineHost(private val context: Context, private val onStateChanged: ()
     val entry: ApiModelEntry,
     var engine: Engine,
     val backend: String,
+    /** The engine's size in tokens (prompt and output together). */
     val maxNumTokens: Int,
   ) {
     var conversation: Conversation? = null
@@ -111,36 +123,7 @@ class ApiEngineHost(private val context: Context, private val onStateChanged: ()
     val sampler: ResolvedSampler,
   )
 
-  sealed class Event {
-    data class Text(val text: String) : Event()
-
-    data object Done : Event()
-
-    data class Failed(val error: Throwable) : Event()
-  }
-
-  class Running(
-    val prepared: Prepared,
-    val events: Channel<Event>,
-    val startMs: Long,
-    val tokensBefore: Int?,
-  )
-
-  enum class End {
-    DONE,
-    TIMEOUT,
-    FAILED,
-    CLIENT_GONE,
-  }
-
-  class Result(
-    val text: String,
-    val firstTextMs: Long,
-    val inferenceMs: Long,
-    val chunks: Int,
-    val end: End,
-    val error: String?,
-  )
+  class Running(val prepared: Prepared, val run: AnswerRun, val tokensBefore: Int?)
 
   /** The loaded model, its expiry and backend, for /api/ps and the notification. */
   fun loadedInfo(): Triple<ApiModelEntry, Long, String>? =
@@ -148,9 +131,11 @@ class ApiEngineHost(private val context: Context, private val onStateChanged: ()
 
   /**
    * Runs [block] when the requests before this one are done. Throws [Busy] when [MAX_WAITING]
-   * requests already wait. [block] gets the milliseconds this request waited.
+   * requests already wait, and a 503 when the API is stopping. [block] gets the milliseconds this
+   * request waited.
    */
   suspend fun <T> withTurn(block: suspend (queueMs: Long) -> T): T {
+    if (closing) throw stoppingError()
     val n = inFlight.incrementAndGet()
     if (n > 1 + MAX_WAITING) {
       inFlight.decrementAndGet()
@@ -159,6 +144,7 @@ class ApiEngineHost(private val context: Context, private val onStateChanged: ()
     val arrived = SystemClock.elapsedRealtime()
     try {
       return turnLock.withLock {
+        if (closing) throw stoppingError()
         unloadJob?.cancel()
         block(SystemClock.elapsedRealtime() - arrived)
       }
@@ -211,29 +197,28 @@ class ApiEngineHost(private val context: Context, private val onStateChanged: ()
         restart = true
       }
     }
+    val config =
+      ConversationConfig(
+        samplerConfig =
+          if (sampler.applied) {
+            SamplerConfig(
+              topK = sampler.topK.value,
+              topP = sampler.topP.value,
+              temperature = sampler.temperature.value,
+              seed = sampler.seed ?: 0,
+            )
+          } else {
+            null
+          },
+        systemInstruction = fresh.system?.let { Contents.of(it) },
+        initialMessages =
+          fresh.earlier.map {
+            if (it.role == TurnRole.ASSISTANT) Message.model(it.text) else Message.user(it.text)
+          },
+      )
+    val engine = l.engine
     val conversation =
-      withContext(engineDispatcher) {
-        l.engine.createConversation(
-          ConversationConfig(
-            samplerConfig =
-              if (sampler.applied) {
-                SamplerConfig(
-                  topK = sampler.topK.value,
-                  topP = sampler.topP.value,
-                  temperature = sampler.temperature.value,
-                  seed = sampler.seed ?: 0,
-                )
-              } else {
-                null
-              },
-            systemInstruction = fresh.system?.let { Contents.of(it) },
-            initialMessages =
-              fresh.earlier.map {
-                if (it.role == TurnRole.ASSISTANT) Message.model(it.text) else Message.user(it.text)
-              },
-          )
-        )
-      }
+      makeOrClose(engineDispatcher, make = { engine.createConversation(config) }, close = { it.close() })
     l.conversation = conversation
     l.held = null
     l.sampler = sampler
@@ -250,30 +235,38 @@ class ApiEngineHost(private val context: Context, private val onStateChanged: ()
     )
   }
 
-  /** Starts the answer. The events arrive in [Running.events]. */
+  /** Starts the answer. Its events arrive in [Running.run]. */
   fun start(prepared: Prepared, maxOutputTokens: Int, timeoutMs: Long): Running {
-    val events = Channel<Event>(Channel.UNLIMITED)
-    val before = tokenCount(prepared.conversation)
+    val events = Channel<AnswerEvent>(Channel.UNLIMITED)
+    val conversation = prepared.conversation
+    val before = tokenCount(conversation)
     prepared.loaded.engineUsed = true
-    active = prepared.conversation
+    val run =
+      AnswerRun(
+        events = events,
+        cancel = { conversation.cancelProcess() },
+        startMs = SystemClock.elapsedRealtime(),
+        clock = SystemClock::elapsedRealtime,
+        log = { Log.w(TAG, it) },
+      )
+    activeRun = run
     wakeLock.acquire(timeoutMs + 60_000L)
-    val startMs = SystemClock.elapsedRealtime()
     try {
-      prepared.conversation.sendMessageAsync(
+      conversation.sendMessageAsync(
         Contents.of(prepared.text),
         object : MessageCallback {
           override fun onMessage(message: Message) {
             val text = message.toString()
-            if (text.isNotEmpty()) events.trySend(Event.Text(text))
+            if (text.isNotEmpty()) events.trySend(AnswerEvent.Text(text))
           }
 
           override fun onDone() {
-            events.trySend(Event.Done)
+            events.trySend(AnswerEvent.Done)
             events.close()
           }
 
           override fun onError(throwable: Throwable) {
-            events.trySend(Event.Failed(throwable))
+            events.trySend(AnswerEvent.Failed(throwable))
             events.close()
           }
         },
@@ -281,82 +274,38 @@ class ApiEngineHost(private val context: Context, private val onStateChanged: ()
         maxOutputToken = maxOutputTokens,
       )
     } catch (e: Exception) {
-      events.trySend(Event.Failed(e))
+      events.trySend(AnswerEvent.Failed(e))
       events.close()
     }
-    return Running(prepared, events, startMs, before)
+    // The stop began while this answer was being set up: it did not see this run.
+    if (closing) run.requestStop()
+    return Running(prepared, run, before)
   }
 
-  /**
-   * Passes the answer's text to [onText] as it comes, until the end or [timeoutMs] from the start.
-   * With [idleEveryMs], calls [onIdle] after that long without text (SSE keep-alive). A failure in
-   * [onText] (the caller went away) stops the answer.
-   */
+  /** See [AnswerRun.pump]. */
   suspend fun pump(
     running: Running,
     timeoutMs: Long,
     idleEveryMs: Long?,
+    onStart: (suspend () -> Unit)? = null,
     onText: suspend (String) -> Unit,
     onIdle: (suspend () -> Unit)?,
-  ): Result {
-    val text = StringBuilder()
-    var first = -1L
-    var chunks = 0
-    val deadline = running.startMs + timeoutMs
-    fun elapsed() = SystemClock.elapsedRealtime() - running.startMs
-    fun result(end: End, error: String?) = Result(text.toString(), first, elapsed(), chunks, end, error)
-    try {
-      while (true) {
-        val remaining = deadline - SystemClock.elapsedRealtime()
-        if (remaining <= 0) {
-          stop(running)
-          return result(
-            End.TIMEOUT,
-            "The answer took longer than ${timeoutMs / 1000} s and was stopped.",
-          )
-        }
-        val wait = if (idleEveryMs != null) minOf(remaining, idleEveryMs) else remaining
-        val received = withTimeoutOrNull(wait) { running.events.receiveCatching() }
-        if (received == null) {
-          if (onIdle != null && SystemClock.elapsedRealtime() < deadline) onIdle()
-          continue
-        }
-        when (val event = received.getOrNull()) {
-          null -> return result(End.DONE, null)
-          is Event.Text -> {
-            if (first < 0) first = elapsed()
-            text.append(event.text)
-            chunks++
-            onText(event.text)
-          }
-          is Event.Done -> return result(End.DONE, null)
-          is Event.Failed -> {
-            Log.e(TAG, "The engine failed while answering", event.error)
-            return result(End.FAILED, event.error.message ?: event.error.toString())
-          }
-        }
-      }
-    } catch (e: CancellationException) {
-      stop(running)
-      throw e
-    } catch (e: Exception) {
-      stop(running)
-      return result(End.CLIENT_GONE, e.toString())
-    }
-  }
+  ): AnswerResult = running.run.pump(timeoutMs, idleEveryMs, onStart, onText, onIdle)
 
   /**
-   * Ends the turn: keeps the conversation for the next request when the answer ended normally,
-   * else drops it (its state after a stopped answer is unknown). Returns the prompt's token count
-   * when the engine gives one.
+   * Ends the turn. The generation is stopped first if nothing read it to its end (the caller went
+   * away before or while it streamed). Keeps the conversation for the next request when the answer
+   * ended normally, else drops it (its state after a stopped answer is unknown). Returns the
+   * prompt's token count when the engine gives one.
    */
-  suspend fun finish(running: Running, result: Result?, requestTurns: List<ChatTurn>): Int? =
+  suspend fun finish(running: Running, result: AnswerResult?, requestTurns: List<ChatTurn>): Int? =
     withContext(NonCancellable) {
-      active = null
+      running.run.stop()
+      if (activeRun === running.run) activeRun = null
       if (wakeLock.isHeld) wakeLock.release()
       val p = running.prepared
       val after = tokenCount(p.conversation)
-      if (result != null && result.end == End.DONE) {
+      if (result != null && result.end == AnswerEnd.DONE) {
         p.loaded.held = requestTurns + ChatTurn(TurnRole.ASSISTANT, result.text)
         p.loaded.sampler = p.sampler
         averageTurnMs = (averageTurnMs * 3 + result.inferenceMs) / 4
@@ -399,43 +348,83 @@ class ApiEngineHost(private val context: Context, private val onStateChanged: ()
     return true
   }
 
-  /** Stops the answer that runs and unloads the model; for the server's stop. */
-  suspend fun shutdown() {
-    active?.let {
-      try {
-        it.cancelProcess()
-      } catch (e: Exception) {
-        Log.w(TAG, "Could not stop the answer: ${e.message}")
-      }
-    }
+  /** The server's stop, first step (before the port closes): no new turn, the answer is stopped. */
+  fun beginShutdown() {
+    closing = true
     unloadJob?.cancel()
-    val done = withTimeoutOrNull(30_000L) { turnLock.withLock { unloadLocked("the local API stopped") } }
-    if (done == null) Log.w(TAG, "An answer did not end within 30 s of the stop")
+    activeRun?.requestStop()
   }
 
+  /**
+   * The server's stop, last step (after the port closed): waits for the turn that runs to end, then
+   * unloads the model and ends the host's thread and jobs. Never gives up and is not cancellable: a
+   * model must not stay loaded, nor its file stay marked as held, after the API is off.
+   */
+  suspend fun shutdown() =
+    withContext(NonCancellable) {
+      beginShutdown()
+      val t0 = SystemClock.elapsedRealtime()
+      val ticker =
+        scope.launch {
+          while (true) {
+            delay(STOP_LOG_EVERY_MS)
+            Log.w(
+              TAG,
+              "The stop still waits for the turn that runs " +
+                "(${(SystemClock.elapsedRealtime() - t0) / 1000} s)",
+            )
+          }
+        }
+      try {
+        turnLock.withLock { unloadLocked("the local API stopped") }
+      } finally {
+        ticker.cancel()
+      }
+      scope.cancel()
+      engineDispatcher.close()
+      Log.i(TAG, "The engine host ended ${SystemClock.elapsedRealtime() - t0} ms after the stop")
+    }
+
   private suspend fun ensureLoaded(entry: ApiModelEntry, numCtx: Int?): Loaded {
-    val wanted = numCtx ?: entry.maxNumTokens
-    val tokens = (entry.contextLength?.let { minOf(wanted, it) } ?: wanted).coerceAtLeast(1)
+    val tokens = resolveEngineTokens(numCtx, entry.maxNumTokens, entry.contextLength)
     val current = loaded
-    if (current != null && current.entry.path == entry.path && current.maxNumTokens == tokens) {
+    if (
+      current != null &&
+        current.entry.path == entry.path &&
+        engineServes(current.maxNumTokens, tokens)
+    ) {
       return current
     }
-    if (current != null) unloadLocked("${entry.name} was asked for")
-    if (EngineOwnership.chatHolds(entry.path)) {
-      throw ApiError(
-        409,
-        "This model is open in Model Shelf's chat. Close that chat, or ask for another model.",
-        code = "model_in_use",
+    // Refuse before anything is unloaded when the chat holds the file.
+    if (EngineOwnership.chatHolds(entry.path)) throw modelInUse()
+    if (current != null) {
+      unloadLocked(
+        if (current.entry.path == entry.path) "num_ctx $tokens is more than its ${current.maxNumTokens}"
+        else "${entry.name} was asked for"
       )
     }
+    if (!EngineOwnership.reserveForApi(entry.path, this)) throw modelInUse()
     val errors = mutableListOf<String>()
-    for (accelerator in entry.accelerators.distinct()) {
-      val t0 = SystemClock.elapsedRealtime()
-      try {
-        val engine = newEngine(entry.path, accelerator, tokens)
+    try {
+      for (accelerator in entry.accelerators.distinct()) {
+        val t0 = SystemClock.elapsedRealtime()
+        val engine =
+          try {
+            newEngine(entry.path, accelerator, tokens)
+          } catch (e: CancellationException) {
+            throw e
+          } catch (e: Exception) {
+            Log.w(TAG, "Could not load ${entry.name} on ${accelerator.uppercase()}: ${e.message}")
+            errors.add("${accelerator.uppercase()}: ${e.message}")
+            continue
+          }
+        if (closing) {
+          closeEngine(engine)
+          Log.i(TAG, "Closed ${entry.name}: the local API stopped while it loaded")
+          throw stoppingError()
+        }
         val l = Loaded(entry = entry, engine = engine, backend = accelerator, maxNumTokens = tokens)
         loaded = l
-        EngineOwnership.apiLoaded(entry.path)
         Log.i(
           TAG,
           "Loaded ${entry.name} on ${accelerator.uppercase()} with max tokens $tokens in " +
@@ -443,11 +432,12 @@ class ApiEngineHost(private val context: Context, private val onStateChanged: ()
         )
         onStateChanged()
         return l
-      } catch (e: Exception) {
-        Log.w(TAG, "Could not load ${entry.name} on ${accelerator.uppercase()}: ${e.message}")
-        errors.add("${accelerator.uppercase()}: ${e.message}")
       }
+    } catch (t: Throwable) {
+      EngineOwnership.releaseForApi(entry.path, this)
+      throw t
     }
+    EngineOwnership.releaseForApi(entry.path, this)
     throw ApiError(
       500,
       "Model Shelf could not load ${entry.name} (${errors.joinToString("; ").take(400)}).",
@@ -455,43 +445,76 @@ class ApiEngineHost(private val context: Context, private val onStateChanged: ()
     )
   }
 
-  private suspend fun newEngine(path: String, accelerator: String, maxNumTokens: Int): Engine =
-    withContext(engineDispatcher) {
-      val backend =
-        when (accelerator) {
-          "cpu" -> Backend.CPU()
-          "gpu" -> Backend.GPU()
-          "npu",
-          "tpu" -> Backend.NPU(nativeLibraryDir = context.applicationInfo.nativeLibraryDir)
-          else -> throw IllegalArgumentException("unknown accelerator $accelerator")
-        }
-      val engine = Engine(EngineConfig(modelPath = path, backend = backend, maxNumTokens = maxNumTokens))
-      try {
-        engine.initialize()
-      } catch (e: Exception) {
-        try {
-          engine.close()
-        } catch (_: Exception) {}
-        throw e
+  /** Makes and initializes an engine; it is closed, not dropped, if the request is cancelled. */
+  private suspend fun newEngine(path: String, accelerator: String, maxNumTokens: Int): Engine {
+    val backend =
+      when (accelerator) {
+        "cpu" -> Backend.CPU()
+        "gpu" -> Backend.GPU()
+        "npu",
+        "tpu" -> Backend.NPU(nativeLibraryDir = context.applicationInfo.nativeLibraryDir)
+        else -> throw IllegalArgumentException("unknown accelerator $accelerator")
       }
-      engine
-    }
+    val cacheDir = engineCacheDir(path)
+    return makeOrClose(
+      engineDispatcher,
+      make = {
+        val engine =
+          Engine(
+            EngineConfig(
+              modelPath = path,
+              backend = backend,
+              maxNumTokens = maxNumTokens,
+              cacheDir = cacheDir,
+            )
+          )
+        try {
+          engine.initialize()
+        } catch (e: Exception) {
+          try {
+            engine.close()
+          } catch (_: Exception) {}
+          throw e
+        }
+        engine
+      },
+      close = {
+        it.close()
+        Log.i(TAG, "Closed the engine of $path: its request was cancelled while it loaded")
+      },
+    )
+  }
+
+  /**
+   * Where the engine keeps its caches (the GPU's weight cache): next to the model, as the chat does,
+   * when that folder is writable; else the app's own cache folder. A model folder the app cannot
+   * write makes the GPU fail with "Permission denied" and the load fall back to the CPU.
+   */
+  private fun engineCacheDir(path: String): String? {
+    val folder = File(path).parentFile
+    val writable =
+      try {
+        folder != null && folder.canWrite()
+      } catch (e: SecurityException) {
+        false
+      }
+    if (writable) return null
+    val dir = File(context.cacheDir, "litertlm")
+    dir.mkdirs()
+    Log.i(TAG, "The folder of $path is not writable; the engine's caches go to ${dir.absolutePath}")
+    return dir.absolutePath
+  }
 
   private suspend fun restartEngine(l: Loaded) {
     val t0 = SystemClock.elapsedRealtime()
-    withContext(engineDispatcher) {
-      try {
-        l.engine.close()
-      } catch (e: Exception) {
-        Log.w(TAG, "Closing the used engine failed: ${e.message}")
-      }
-    }
+    closeEngine(l.engine)
     try {
       l.engine = newEngine(l.entry.path, l.backend, l.maxNumTokens)
     } catch (e: Exception) {
       loaded = null
-      EngineOwnership.apiLoaded(null)
+      EngineOwnership.releaseForApi(l.entry.path, this)
       onStateChanged()
+      if (e is CancellationException) throw e
       throw ApiError(
         500,
         "Model Shelf could not make a new engine for ${l.entry.name}: ${e.message}",
@@ -504,6 +527,16 @@ class ApiEngineHost(private val context: Context, private val onStateChanged: ()
       "New engine for ${l.entry.name} (${l.entry.statefulWhy}) in " +
         "${SystemClock.elapsedRealtime() - t0} ms",
     )
+  }
+
+  private suspend fun closeEngine(engine: Engine) {
+    withContext(engineDispatcher + NonCancellable) {
+      try {
+        engine.close()
+      } catch (e: Exception) {
+        Log.w(TAG, "Closing the engine failed: ${e.message}")
+      }
+    }
   }
 
   private suspend fun closeConversation(l: Loaded) {
@@ -522,33 +555,20 @@ class ApiEngineHost(private val context: Context, private val onStateChanged: ()
     val l = loaded ?: return
     loaded = null
     closeConversation(l)
-    withContext(engineDispatcher + NonCancellable) {
-      try {
-        l.engine.close()
-      } catch (e: Exception) {
-        Log.w(TAG, "Closing the engine failed: ${e.message}")
-      }
-    }
-    EngineOwnership.apiLoaded(null)
+    closeEngine(l.engine)
+    EngineOwnership.releaseForApi(l.entry.path, this)
     Log.i(TAG, "Unloaded ${l.entry.name} ($why)")
     onStateChanged()
   }
 
-  private suspend fun stop(running: Running) {
-    withContext(NonCancellable) {
-      try {
-        running.prepared.conversation.cancelProcess()
-      } catch (e: Exception) {
-        Log.w(TAG, "Could not stop the answer: ${e.message}")
-      }
-      withTimeoutOrNull(STOP_WAIT_MS) {
-        while (true) {
-          val event = running.events.receiveCatching().getOrNull() ?: break
-          if (event !is Event.Text) break
-        }
-      }
-    }
-  }
+  private fun modelInUse() =
+    ApiError(
+      409,
+      "This model is open in Model Shelf's chat. Close that chat, or ask for another model.",
+      code = "model_in_use",
+    )
+
+  private fun stoppingError() = ApiError(503, STOPPING_MESSAGE, "stopping")
 
   private fun tokenCount(conversation: Conversation): Int? =
     try {

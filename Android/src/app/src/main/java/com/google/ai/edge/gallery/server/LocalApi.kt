@@ -20,28 +20,36 @@ import android.content.Context
 import android.content.Intent
 import android.util.Log
 import java.net.BindException
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 private const val TAG = "MSLocalApi"
 
 /** What the screens and the notification show about the local API. */
 data class LocalApiState(
+  /** The port is bound and requests are answered. */
   val running: Boolean = false,
+  /** A stop is under way: requests get a 503 until the model is unloaded and the port closed. */
+  val stopping: Boolean = false,
   /** Why the last start failed, or null. */
   val error: String? = null,
   /** The loaded model's API name, or null. */
   val loadedModel: String? = null,
   val loadedBackend: String? = null,
   val requests: Long = 0,
+  /** The last start request the service has handled (see [LocalApi.start]). */
+  val handledStart: Long = 0,
 )
 
 /**
- * Model Shelf's local API (DESIGN.md §g): HTTP on 127.0.0.1:11434 inside a foreground service, for
- * other apps on this phone that the user lets in. [start] and [stop] go through the service so the
- * process stays alive while the API is on.
+ * Model Shelf's local API: HTTP on 127.0.0.1:11434 inside a foreground service, for other apps on
+ * this phone that the user lets in. [start] and [stop] go through the service so the process stays
+ * alive while the API is on; the service handles them one at a time, in the order they came.
  */
 object LocalApi {
   const val HOST = "127.0.0.1"
@@ -59,6 +67,9 @@ object LocalApi {
 
   @Volatile private var server: ApiServer? = null
   @Volatile private var tokenStore: ApiTokenStore? = null
+  /** One start or stop at a time. */
+  private val ops = Mutex()
+  private val startRequests = AtomicLong(0)
 
   fun tokens(context: Context): ApiTokenStore =
     tokenStore
@@ -66,12 +77,20 @@ object LocalApi {
         tokenStore ?: ApiTokenStore(context.applicationContext).also { tokenStore = it }
       }
 
-  /** Turns the API on (from a screen in front: Android lets only that start the service). */
-  fun start(context: Context) {
+  /**
+   * Turns the API on (from a screen in front: Android lets only that start the service). Returns the
+   * request's number: [LocalApiState.handledStart] reaches it once the service has handled this
+   * start (after any stop that came before it).
+   */
+  fun start(context: Context): Long {
+    val number = startRequests.incrementAndGet()
     _state.update { it.copy(error = null) }
     context.startForegroundService(
-      Intent(context, ApiServerService::class.java).setAction(ApiServerService.ACTION_START)
+      Intent(context, ApiServerService::class.java)
+        .setAction(ApiServerService.ACTION_START)
+        .putExtra(ApiServerService.EXTRA_START_NUMBER, number)
     )
+    return number
   }
 
   /** Turns the API off. */
@@ -82,14 +101,19 @@ object LocalApi {
   }
 
   /** Called by the service: binds the port. Returns null, or why it failed. */
-  @Synchronized
-  internal fun startServer(context: Context): String? {
-    if (server != null) return null
+  internal suspend fun startServer(context: Context, startNumber: Long): String? =
+    ops.withLock {
+      val why = if (server != null) null else bind(context)
+      _state.update { it.copy(handledStart = maxOf(it.handledStart, startNumber)) }
+      why
+    }
+
+  private suspend fun bind(context: Context): String? {
     val s = ApiServer(context.applicationContext, tokens(context), ::refresh)
     return try {
       s.start()
       server = s
-      _state.update { it.copy(running = true, error = null) }
+      _state.update { it.copy(running = true, stopping = false, error = null) }
       null
     } catch (e: Exception) {
       val why =
@@ -99,16 +123,25 @@ object LocalApi {
           "The local API could not start: ${e.message ?: e.javaClass.simpleName}"
         }
       Log.e(TAG, why, e)
+      s.stop() // ends the engine host's thread
       _state.update { it.copy(running = false, error = why) }
       why
     }
   }
 
-  /** Called by the service. */
+  /** Called by the service: returns when the model is unloaded and the port closed. */
   internal suspend fun stopServer() {
-    val s = synchronized(this) { server.also { server = null } } ?: return
-    s.stop()
-    _state.update { LocalApiState(running = false, requests = it.requests) }
+    ops.withLock {
+      val s = server ?: return@withLock
+      _state.update { it.copy(running = false, stopping = true) }
+      ApiServerService.updateNotification()
+      try {
+        s.stop()
+      } finally {
+        server = null
+        _state.update { LocalApiState(requests = it.requests, handledStart = it.handledStart) }
+      }
+    }
   }
 
   /** The server's catalog when it runs (the screens list models with it). */

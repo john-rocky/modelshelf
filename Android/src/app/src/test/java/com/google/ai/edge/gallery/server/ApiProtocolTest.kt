@@ -203,7 +203,7 @@ class ApiProtocolTest {
     assertRefused(400) { ka("\"soon\"") }
   }
 
-  // ---- Sampler order (DESIGN §g-3, row 3) ---------------------------------------------------
+  // ---- Sampler order ------------------------------------------------------------------------
 
   @Test
   fun samplerTakesTheRequestThenTheCardThenTheApp() {
@@ -234,7 +234,7 @@ class ApiProtocolTest {
     assertEquals("npu-file-own", s.header())
   }
 
-  // ---- Conversation plan (DESIGN §g-3, row 1) -----------------------------------------------
+  // ---- Conversation plan --------------------------------------------------------------------
 
   @Test
   fun aRepeatPlusOneUserMessageContinues() {
@@ -331,7 +331,7 @@ class ApiProtocolTest {
     val o = JsonParser.parseString(ApiJson.ollamaShow(entry)).asJsonObject
     // ollama-python 0.6.3 ShowResponse: model_info has no default, so it must be present.
     assertTrue(o.has("model_info"))
-    assertEquals("top_k 20\ntop_p 0.95\ntemperature 1.0", o.get("parameters").asString)
+    assertEquals("top_k 20\ntop_p 0.95\ntemperature 1.0\nnum_ctx 4096", o.get("parameters").asString)
     val ms = o.getAsJsonObject("modelshelf")
     assertTrue(ms.get("stateful").asBoolean)
     assertEquals(
@@ -339,6 +339,45 @@ class ApiProtocolTest {
       ms.getAsJsonObject("sampler").getAsJsonObject("top_k").get("source").asString,
     )
     assertEquals(300, ms.get("request_timeout_s").asInt)
+  }
+
+  @Test
+  fun showGivesTheEngineLimitNotTheModelsContextLength() {
+    // A model that could take 32,000 tokens, in an engine the app makes for 4,096.
+    val big = entry.copy(maxNumTokens = 4096, contextLength = 32_000)
+    val o = JsonParser.parseString(ApiJson.ollamaShow(big)).asJsonObject
+    assertEquals(4096, o.getAsJsonObject("model_info").get("litertlm.context_length").asInt)
+    assertTrue(o.get("parameters").asString.endsWith("num_ctx 4096"))
+    assertEquals(32_000, o.getAsJsonObject("modelshelf").get("context_length").asInt)
+  }
+
+  // ---- options.num_ctx ----------------------------------------------------------------------
+
+  @Test
+  fun numCtxIsCappedAtTheModelsMaxTokens() {
+    assertEquals(4096, resolveEngineTokens(null, 4096, null))
+    assertEquals(2048, resolveEngineTokens(2048, 4096, null))
+    // A model list without a context length (most of them) no longer lets num_ctx grow the engine.
+    assertEquals(4096, resolveEngineTokens(1_000_000, 4096, null))
+    assertEquals(4096, resolveEngineTokens(1_000_000, 4096, 32_000))
+    assertEquals(1024, resolveEngineTokens(8192, 4096, 1024))
+    assertEquals(1, resolveEngineTokens(1, 4096, null))
+  }
+
+  @Test
+  fun aBiggerEngineServesASmallerNumCtxWithoutAReload() {
+    assertTrue(engineServes(loadedTokens = 4096, wantedTokens = 2048))
+    assertTrue(engineServes(loadedTokens = 4096, wantedTokens = 4096))
+    assertFalse(engineServes(loadedTokens = 2048, wantedTokens = 4096))
+  }
+
+  @Test
+  fun notAppliedHeaderKeepsOnlySafeCharacters() {
+    assertEquals(
+      "options.mirostat,options.badnameX-Injected1",
+      headerSafe(listOf("options.mirostat", "options.bad name\r\nX-Injected: 1")),
+    )
+    assertEquals(64, headerSafe(listOf("x".repeat(500))).length)
   }
 
   @Test

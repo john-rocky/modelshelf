@@ -72,6 +72,11 @@ import kotlinx.coroutines.launch
 private const val TAG = "AGLlmChatModelHelper"
 private const val EXTRA_CONTEXT_EPHEMERAL_INFERENCE = "aicore_ephemeral_inference"
 
+// Model Shelf: shown when the local API holds the model file.
+private const val API_HOLDS_MODEL =
+  "The local API is using this model. Stop the local API in Settings > Local API to chat with " +
+    "the model here."
+
 /**
  * Holds the runtime state for an initialized LiteRT-LM model.
  *
@@ -127,14 +132,13 @@ object LlmChatModelHelper : LlmModelHelper {
       return
     }
     model.markInitializationStarted()
-    // Model Shelf: one engine per model file; the local API may hold this one (DESIGN.md §g-2).
+    // Model Shelf: one engine per model file; the local API may hold this one. The file is
+    // reserved right before the engine is made (below), and given back if the engine cannot be
+    // made, and in cleanUp.
     if (EngineOwnership.apiHolds(model.getPath(context = context))) {
-      val message =
-        "The local API is using this model. Stop the local API in Settings > Local API to chat " +
-          "with the model here."
-      Log.i(TAG, "'${model.name}': $message")
-      model.markInitializationFailed(message)
-      onDone(message)
+      Log.i(TAG, "'${model.name}': $API_HOLDS_MODEL")
+      model.markInitializationFailed(API_HOLDS_MODEL)
+      onDone(API_HOLDS_MODEL)
       return
     }
     // Prepare options.
@@ -211,6 +215,9 @@ object LlmChatModelHelper : LlmModelHelper {
       )
     // Create an instance of LiteRT LM engine and conversation.
     try {
+      if (!EngineOwnership.reserveForChat(model.name, modelPath)) {
+        throw IllegalStateException(API_HOLDS_MODEL)
+      }
       val enableBenchmark = false
       ExperimentalFlags.enableBenchmark = enableBenchmark
       ExperimentalFlags.enableSpeculativeDecoding = speculativeDecoding
@@ -247,8 +254,8 @@ object LlmChatModelHelper : LlmModelHelper {
           metricsTracker = metricsTracker,
         )
       )
-      EngineOwnership.chatLoaded(model.name, modelPath)
     } catch (e: Exception) {
+      EngineOwnership.releaseForChat(model.name)
       val errorMsg = cleanUpMediapipeTaskErrorMessage(e.message ?: "Unknown error")
       model.markInitializationFailed(errorMsg)
       metricsTracker.onModelInitialized()
@@ -390,7 +397,7 @@ object LlmChatModelHelper : LlmModelHelper {
     } catch (e: Exception) {
       Log.e(TAG, "Failed to close the engine: ${e.message}")
     }
-    EngineOwnership.chatReleased(model.name)
+    EngineOwnership.releaseForChat(model.name)
 
     instance.metricsTracker?.resetSession()
     instance.metricsTracker?.close()

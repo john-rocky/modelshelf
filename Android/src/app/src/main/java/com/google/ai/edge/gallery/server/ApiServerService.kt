@@ -37,6 +37,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 
 private const val TAG = "MSApiService"
@@ -44,48 +45,59 @@ private const val CHANNEL_ID = "local_api"
 private const val NOTIFICATION_ID = 11434
 
 /**
- * Keeps the local API's process alive while it is on (DESIGN.md §g-2): a foreground service of the
- * type specialUse with a notification that names the address and the loaded model, and a Stop
- * action.
+ * Keeps the local API's process alive while it is on: a foreground service of the type specialUse
+ * with a notification that names the address and the loaded model, and a Stop action.
+ *
+ * Start and stop commands are handled one at a time, in the order they came; a command ends the
+ * service only if no command came after it (stopSelfResult), so a Start right after a Stop keeps
+ * the service and its notification.
  */
 class ApiServerService : Service() {
+  private class Command(val start: Boolean, val startId: Int, val startNumber: Long)
+
   private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+  private val commands = Channel<Command>(Channel.UNLIMITED)
 
   override fun onBind(intent: Intent?): IBinder? = null
 
   override fun onCreate() {
     super.onCreate()
     instance = this
+    scope.launch { for (command in commands) handle(command) }
   }
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-    when (intent?.action) {
-      ACTION_STOP -> {
-        Log.i(TAG, "Stop asked")
-        scope.launch {
-          LocalApi.stopServer()
-          ServiceCompat.stopForeground(this@ApiServerService, ServiceCompat.STOP_FOREGROUND_REMOVE)
-          stopSelf()
-        }
-      }
-      else -> {
-        goForeground()
-        scope.launch {
-          val error = LocalApi.startServer(this@ApiServerService)
-          if (error != null) {
-            ServiceCompat.stopForeground(this@ApiServerService, ServiceCompat.STOP_FOREGROUND_REMOVE)
-            stopSelf()
-          } else {
-            updateNotification()
-          }
-        }
-      }
+    val start = intent?.action != ACTION_STOP
+    if (start) {
+      // Android wants startForeground() within seconds of startForegroundService().
+      goForeground()
+    } else {
+      Log.i(TAG, "Stop asked")
     }
+    commands.trySend(Command(start, startId, intent?.getLongExtra(EXTRA_START_NUMBER, 0L) ?: 0L))
     return START_NOT_STICKY
+  }
+
+  private suspend fun handle(command: Command) {
+    if (command.start) {
+      val error = LocalApi.startServer(this, command.startNumber)
+      if (error != null) end(command.startId) else updateNotification()
+    } else {
+      LocalApi.stopServer()
+      end(command.startId)
+    }
+  }
+
+  /** Ends the service unless a command came after [startId]. */
+  private fun end(startId: Int) {
+    if (stopSelfResult(startId)) {
+      ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+    }
   }
 
   override fun onDestroy() {
     instance = null
+    commands.close()
     scope.launch { LocalApi.stopServer() }.invokeOnCompletion { scope.cancel() }
     super.onDestroy()
   }
@@ -111,6 +123,7 @@ class ApiServerService : Service() {
   companion object {
     const val ACTION_START = "io.github.johnrocky.modelshelf.action.START_LOCAL_API"
     const val ACTION_STOP = "io.github.johnrocky.modelshelf.action.STOP_LOCAL_API"
+    const val EXTRA_START_NUMBER = "start_number"
 
     @Volatile private var instance: ApiServerService? = null
 
@@ -143,8 +156,12 @@ class ApiServerService : Service() {
           PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
       val loaded =
-        state.loadedModel?.let { "$it loaded (${state.loadedBackend?.uppercase() ?: "?"})" }
-          ?: "No model loaded"
+        if (state.stopping) {
+          "Stopping: the answer that runs ends, then the model unloads"
+        } else {
+          state.loadedModel?.let { "$it loaded (${state.loadedBackend?.uppercase() ?: "?"})" }
+            ?: "No model loaded"
+        }
       return NotificationCompat.Builder(context, CHANNEL_ID)
         .setSmallIcon(android.R.drawable.ic_dialog_info)
         .setContentTitle("Model Shelf API · ${LocalApi.HOST}:${LocalApi.PORT}")

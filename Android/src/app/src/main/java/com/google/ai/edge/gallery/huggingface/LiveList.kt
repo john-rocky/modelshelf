@@ -48,7 +48,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 
 /*
- * The shelf: litert-community's LiteRT-LM repos on Hugging Face, listed live (DESIGN.md §b).
+ * The shelf: litert-community's LiteRT-LM repos on Hugging Face, listed live.
  *
  * One list call returns every repo with its card data and file names. Each file's defaults come
  * from, in this order:
@@ -98,7 +98,7 @@ private const val MAX_DEFAULT_MAX_TOKENS = 4096
 private const val FALLBACK_MAX_TOKENS = 1024
 /** The Max tokens slider starts at 2000 (Config.kt); a smaller context gets a fixed value. */
 private const val MAX_TOKENS_SLIDER_MIN = 2000
-/** A `checked[]` row puts a file on the main shelf with at least this many runs (DESIGN §b-4). */
+/** A `checked[]` row puts a file on the main shelf with at least this many runs. */
 private const val MIN_CHECK_RUNS = 3
 private const val SAMPLER_TOLERANCE = 1e-4f
 
@@ -126,11 +126,11 @@ enum class DefaultsSource(val label: String) {
   APP("the app's defaults"),
 }
 
-/** Why a shelf file is folded below the main shelf instead of listed in it (DESIGN §b-4). */
+/** Why a shelf file is folded below the main shelf instead of listed in it. */
 enum class FoldReason(val badge: String) {
   /** No android `checked[]` row with [MIN_CHECK_RUNS] runs and the sampler the app will use. */
   NOT_CHECKED("Not checked on a phone"),
-  /** The model keeps state between conversations on one engine (`stateful`, DESIGN §b-5). */
+  /** The model keeps state between conversations on one engine (`stateful`). */
   STATE_MODEL("State model"),
 }
 
@@ -138,7 +138,7 @@ enum class FoldReason(val badge: String) {
 data class GatedRepo(val id: String, val url: String)
 
 /**
- * What the local API needs about a shelf file besides its list entry (DESIGN.md §g-3): the
+ * What the local API needs about a shelf file besides its list entry: the
  * sampler values as written with their source, whether the model keeps state, and the limits.
  */
 data class ShelfApiMeta(
@@ -604,7 +604,7 @@ class LiveListClient(private val cacheDir: File) {
   }
 
   /**
-   * The first `checked[]` row that puts a file on the main shelf (DESIGN §b-4 line 1): android, at
+   * The first `checked[]` row that puts a file on the main shelf: android, at
    * least [MIN_CHECK_RUNS] runs, and the sampler the app will use for this file (the card's or
    * manifest's session_defaults, the app's defaults for a key they do not name). A row without a
    * sampler says nothing about one and does not count.

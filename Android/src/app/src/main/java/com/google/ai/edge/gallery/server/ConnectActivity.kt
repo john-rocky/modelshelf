@@ -33,6 +33,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -46,8 +47,11 @@ import kotlinx.coroutines.withTimeoutOrNull
 
 private const val TAG = "MSConnect"
 
+/** How long Allow waits for the API to be on (a stop that runs finishes first). */
+private const val START_WAIT_MS = 90_000L
+
 /**
- * The connect screen (DESIGN.md §g-2): another app opens it with
+ * The connect screen: another app opens it with
  * `startActivityForResult(Intent("io.github.johnrocky.modelshelf.action.CONNECT"))`. Model Shelf
  * names the app and asks the user. Allow turns the API on and returns `base_url` and `token`;
  * Deny returns RESULT_CANCELED with `error` = "denied".
@@ -94,8 +98,9 @@ class ConnectActivity : ComponentActivity() {
               Text(
                 "$label ($caller) will be able to send text to the models you downloaded in " +
                   "Model Shelf and read the answers, through Model Shelf's local API " +
-                  "(${LocalApi.BASE_URL}). Nothing leaves this phone. You can remove the access " +
-                  "in Settings > Local API.",
+                  "(${LocalApi.BASE_URL}). The models run on this phone and Model Shelf sends " +
+                  "nothing off it; what $label does with the answers is up to $label. You can " +
+                  "remove the access in Settings > Local API.",
                 style = MaterialTheme.typography.bodyLarge,
               )
               error?.let {
@@ -106,7 +111,12 @@ class ConnectActivity : ComponentActivity() {
                 )
               }
               if (busy) {
-                Text("Turning on the local API...", style = MaterialTheme.typography.bodyMedium)
+                val api by LocalApi.state.collectAsState()
+                Text(
+                  if (api.stopping) "Waiting for the local API to stop, then turning it on..."
+                  else "Turning on the local API...",
+                  style = MaterialTheme.typography.bodyMedium,
+                )
               }
               Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 OutlinedButton(enabled = !busy, onClick = { deny() }) { Text("Deny") }
@@ -129,10 +139,13 @@ class ConnectActivity : ComponentActivity() {
     busy = true
     error = null
     val token = LocalApi.tokens(this).issue(caller, label)
-    LocalApi.start(this)
+    val number = LocalApi.start(this)
     lifecycleScope.launch {
+      // The answer must describe this start, not a server that a queued stop is about to close.
       val state =
-        withTimeoutOrNull(15_000L) { LocalApi.state.first { it.running || it.error != null } }
+        withTimeoutOrNull(START_WAIT_MS) {
+          LocalApi.state.first { it.handledStart >= number && (it.running || it.error != null) }
+        }
       if (state?.running == true) {
         Log.i(TAG, "Allowed $caller ($label); the local API is on")
         setResult(
@@ -144,7 +157,7 @@ class ConnectActivity : ComponentActivity() {
         finish()
       } else {
         LocalApi.tokens(this@ConnectActivity).revoke(caller)
-        val why = state?.error ?: "The local API did not start within 15 s."
+        val why = state?.error ?: "The local API did not start within ${START_WAIT_MS / 1000} s."
         Log.w(TAG, "Allowed $caller but the API is off: $why")
         error = why
         busy = false

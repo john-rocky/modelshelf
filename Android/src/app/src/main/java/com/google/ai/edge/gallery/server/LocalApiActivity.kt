@@ -20,6 +20,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.os.Bundle
+import android.os.PersistableBundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Arrangement
@@ -102,16 +103,27 @@ private fun LocalApiScreen() {
     Text("Local API", style = MaterialTheme.typography.headlineSmall)
     Text(
       "Apps on this phone can use the models you downloaded here, through an Ollama- and " +
-        "OpenAI-compatible API at ${LocalApi.BASE_URL}. Each app asks you first. Nothing leaves " +
-        "the phone.",
+        "OpenAI-compatible API at ${LocalApi.BASE_URL}. Each app asks you first. The models run " +
+        "on this phone and Model Shelf sends nothing off it; what an app does with the answers is " +
+        "up to that app.",
       style = MaterialTheme.typography.bodyMedium,
     )
 
     // Status and the switch.
     Text(
-      if (state.running) "On · ${LocalApi.BASE_URL}" else "Off",
+      when {
+        state.stopping -> "Stopping..."
+        state.running -> "On · ${LocalApi.BASE_URL}"
+        else -> "Off"
+      },
       style = MaterialTheme.typography.titleMedium,
     )
+    if (state.stopping) {
+      Text(
+        "The answer that runs ends, then the model unloads and the port closes.",
+        style = MaterialTheme.typography.bodySmall,
+      )
+    }
     if (state.running) {
       Text(
         state.loadedModel?.let { "Loaded: $it (${state.loadedBackend?.uppercase() ?: "?"})" }
@@ -123,10 +135,10 @@ private fun LocalApiScreen() {
     state.error?.let {
       Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
     }
-    if (state.running) {
-      OutlinedButton(onClick = { LocalApi.stop(context) }) { Text("Stop local API") }
-    } else {
-      Button(onClick = { LocalApi.start(context) }) { Text("Start local API") }
+    when {
+      state.stopping -> OutlinedButton(enabled = false, onClick = {}) { Text("Stopping...") }
+      state.running -> OutlinedButton(onClick = { LocalApi.stop(context) }) { Text("Stop local API") }
+      else -> Button(onClick = { LocalApi.start(context) }) { Text("Start local API") }
     }
 
     HorizontalDivider()
@@ -168,7 +180,11 @@ private fun LocalApiScreen() {
           copiedToken = token
           grants = tokens.all()
           val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-          clipboard.setPrimaryClip(ClipData.newPlainText("Model Shelf API token", token))
+          val clip = ClipData.newPlainText("Model Shelf API token", token)
+          // ClipDescription.EXTRA_IS_SENSITIVE (API 33): the clipboard preview hides the token.
+          clip.description.extras =
+            PersistableBundle().apply { putBoolean("android.content.extra.IS_SENSITIVE", true) }
+          clipboard.setPrimaryClip(clip)
         }
       ) {
         Text("Copy a token")

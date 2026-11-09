@@ -167,7 +167,7 @@ fun SettingsDialog(
           verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
           val context = LocalContext.current
-          // Model Shelf: the local API (DESIGN.md §g).
+          // Model Shelf: the local API.
           Column(
             modifier = Modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(4.dp),

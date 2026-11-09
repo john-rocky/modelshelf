@@ -29,8 +29,10 @@ import com.google.ai.edge.gallery.huggingface.LiveListClient
 import com.google.ai.edge.gallery.huggingface.ShelfApiMeta
 import com.google.gson.Gson
 import java.io.File
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 private const val TAG = "MSApiCatalog"
 
@@ -46,7 +48,7 @@ private const val FRESH_FOR_MS = 15_000L
 /**
  * The models the local API can serve: the LLM files on this phone that Google's model list or the
  * shelf names, read from the copies the app saved (the API never fetches a list or a file;
- * downloads stay in the app, DESIGN §g-3 row 4).
+ * downloads stay in the app).
  */
 class ApiModelCatalog(private val context: Context) {
   private val lock = Mutex()
@@ -60,7 +62,7 @@ class ApiModelCatalog(private val context: Context) {
       if (refresh || builtAtMs == 0L || now - builtAtMs > FRESH_FOR_MS) {
         cached =
           try {
-            build()
+            withContext(Dispatchers.IO) { build() }
           } catch (e: Exception) {
             Log.e(TAG, "Could not read the model lists", e)
             cached

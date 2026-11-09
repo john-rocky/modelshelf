@@ -89,7 +89,7 @@ object ApiJson {
       add("families", JsonArray().apply { add(family) })
       addProperty("parameter_size", "")
       addProperty("quantization_level", quantizationOf(e.file))
-      // The shelf's line for this file (DESIGN §g-2): which phone check put it on the main shelf.
+      // The shelf's line for this file: which phone check put it on the main shelf.
       addProperty("checked", e.checked ?: "not checked on a phone")
     }
 
@@ -140,11 +140,15 @@ object ApiJson {
   /** The model's sampler as /api/show's "parameters" text and as values with their sources. */
   fun ollamaShow(e: ApiModelEntry): String {
     val sampler = resolveSampler(SamplerRequest(), e.sampler, npu = e.firstIsNpu)
+    // The most tokens an engine of this API holds (options.num_ctx is capped there), not the
+    // model's own context length (that one is modelshelf.context_length).
+    val engineTokens = resolveEngineTokens(null, e.maxNumTokens, e.contextLength)
     val parameters =
       if (!sampler.applied) {
-        "# the NPU file uses its own sampler; request values are not applied"
+        "# the NPU file uses its own sampler; request values are not applied\nnum_ctx $engineTokens"
       } else {
-        "top_k ${sampler.topK.value}\ntop_p ${sampler.topP.value}\ntemperature ${sampler.temperature.value}"
+        "top_k ${sampler.topK.value}\ntop_p ${sampler.topP.value}\ntemperature " +
+          "${sampler.temperature.value}\nnum_ctx $engineTokens"
       }
     return JsonObject()
       .apply {
@@ -162,7 +166,7 @@ object ApiJson {
           JsonObject().apply {
             addProperty("general.architecture", "litertlm")
             addProperty("general.basename", e.repoId.substringAfter('/'))
-            e.contextLength?.let { addProperty("litertlm.context_length", it) }
+            addProperty("litertlm.context_length", engineTokens)
           },
         )
         add("capabilities", JsonArray().apply { add("completion") })

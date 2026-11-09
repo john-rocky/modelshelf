@@ -24,7 +24,7 @@ import java.security.MessageDigest
 import java.security.SecureRandom
 
 /**
- * The apps the user let use the local API (DESIGN.md §g-2): one token per app, given out by the
+ * The apps the user let use the local API: one token per app, given out by the
  * connect screen. Only a hash of each token is kept. A new token for an app replaces its old one.
  */
 class ApiTokenStore(context: Context) {
