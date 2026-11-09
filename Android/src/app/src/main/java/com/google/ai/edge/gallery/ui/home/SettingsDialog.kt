@@ -167,6 +167,30 @@ fun SettingsDialog(
           verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
           val context = LocalContext.current
+          // Model Shelf: the local API (DESIGN.md §g).
+          Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+          ) {
+            Text(
+              "Local API",
+              style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Medium),
+            )
+            Text(
+              "Let other apps on this phone use your downloaded models.",
+              style = MaterialTheme.typography.bodySmall,
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedButton(
+              onClick = {
+                context.startActivity(
+                  Intent(context, com.google.ai.edge.gallery.server.LocalApiActivity::class.java)
+                )
+              }
+            ) {
+              Text("Open Local API")
+            }
+          }
           // Theme switcher.
           Column(modifier = Modifier.fillMaxWidth().semantics(mergeDescendants = true) {}) {
             Text(

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="app_name">Caller Sample</string>
+  <string name="intro">This app has no model of its own. It asks Model Shelf on this phone through Model Shelf\'s local API. Nothing leaves the phone.</string>
+  <string name="connect">Connect to Model Shelf</string>
+  <string name="model_label">Model</string>
+  <string name="model_hint">A model name from Model Shelf</string>
+  <string name="prompt_label">Prompt</string>
+  <string name="prompt_default">What is the capital of France? Answer in one sentence.</string>
+  <string name="ask_ollama">Ask via Ollama API</string>
+  <string name="ask_openai">Ask via OpenAI API</string>
+  <string name="ollama_title">Ollama API · POST /api/chat</string>
+  <string name="openai_title">OpenAI API · POST /v1/chat/completions</string>
+</resources>

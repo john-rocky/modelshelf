@@ -129,6 +129,9 @@ dependencies {
   implementation(libs.mcp.kotlin.sdk)
   implementation(libs.ktor.client.android)
   implementation(libs.ktor.client.core)
+  // Model Shelf: the local API (DESIGN.md §g). No class of ktor-server-core or ktor-server-cio
+  // 3.4.3 refers to jansi (desktop console colors, with native libraries for other systems).
+  implementation(libs.ktor.server.cio) { exclude(group = "org.fusesource.jansi", module = "jansi") }
   implementation(libs.tasks.vision)
   implementation(libs.tasks.retrieval)
   implementation(libs.androidx.media3.exoplayer)

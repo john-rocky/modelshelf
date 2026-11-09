@@ -137,9 +137,32 @@ enum class FoldReason(val badge: String) {
 /** A gated repo: listed with a link to its page; this app cannot download it (no sign-in). */
 data class GatedRepo(val id: String, val url: String)
 
+/**
+ * What the local API needs about a shelf file besides its list entry (DESIGN.md §g-3): the
+ * sampler values as written with their source, whether the model keeps state, and the limits.
+ */
+data class ShelfApiMeta(
+  val topK: Int?,
+  val topP: Float?,
+  val temperature: Float?,
+  /** Where the sampler values come from, e.g. "the model card (session_defaults, from readme)". */
+  val samplerSource: String,
+  val stateful: Boolean,
+  /** Why the file counts as stateful; null when it does not. */
+  val statefulWhy: String?,
+  val requestTimeoutS: Int?,
+  val maxOutputTokensMin: Int?,
+  val contextLength: Int?,
+  val sha256: String?,
+  /** The phone check that put the file on the main shelf, or null. */
+  val checked: String?,
+)
+
 /** The result of one shelf load. */
 data class LiveListResult(
   val models: List<AllowedModel> = emptyList(),
+  /** Per model name: what the local API reads about the file. */
+  val api: Map<String, ShelfApiMeta> = emptyMap(),
   /** Per model name: the line shown under that model in the list. */
   val notes: Map<String, String> = emptyMap(),
   /** Per model name of a folded file: why it is folded. Files not in it are on the main shelf. */
@@ -218,15 +241,21 @@ class LiveListClient(private val cacheDir: File) {
 
   private val apiBaseUrl: String by lazy { readBaseUrlOverride() ?: HF_BASE_URL }
 
-  suspend fun load(): LiveListResult =
+  /**
+   * Loads the shelf. With [networkAllowed] false (the local API) only the copy saved on the device
+   * is read and nothing is fetched or written.
+   */
+  suspend fun load(networkAllowed: Boolean = true): LiveListResult =
     withContext(Dispatchers.IO) {
       cacheDir.mkdirs()
       val listUrl =
         "$apiBaseUrl/api/models?author=$LIVE_LIST_AUTHOR&filter=litert-lm&limit=1000" +
           "&expand=cardData&expand=sha&expand=siblings&expand=lastModified&expand=downloads" +
           "&expand=gated"
-      Log.d(TAG, "Loading the shelf: $listUrl")
-      val fetched = httpGet(listUrl)
+      if (networkAllowed) Log.d(TAG, "Loading the shelf: $listUrl")
+      val fetched =
+        if (networkAllowed) httpGet(listUrl)
+        else HttpResult(body = null, error = "saved copy only")
       var networkError: String? = fetched.error
       var repos: List<ListRepo>? = fetched.body?.let { parseList(it) }
       if (fetched.body != null && repos == null) {
@@ -235,7 +264,7 @@ class LiveListClient(private val cacheDir: File) {
       val online = repos != null
       var savedAtMs = System.currentTimeMillis()
       if (!online) {
-        Log.w(TAG, "Shelf list not fetched ($networkError); reading the saved copy")
+        if (networkAllowed) Log.w(TAG, "Shelf list not fetched ($networkError); reading the saved copy")
         repos = readText(File(cacheDir, LIST_FILE))?.let { parseList(it) }
         savedAtMs = readSavedAt()
         if (repos == null) {
@@ -259,6 +288,7 @@ class LiveListClient(private val cacheDir: File) {
       val repoFiles = loadRepoFiles(usable, online)
 
       val models = mutableListOf<AllowedModel>()
+      val api = mutableMapOf<String, ShelfApiMeta>()
       val notes = mutableMapOf<String, String>()
       val folded = mutableMapOf<String, FoldReason>()
       var skipped = 0
@@ -275,6 +305,7 @@ class LiveListClient(private val cacheDir: File) {
         shown++
         for (entry in converted) {
           models.add(entry.model)
+          api[entry.model.name] = entry.api
           notes[entry.model.name] = entry.note
           entry.fold?.let { folded[entry.model.name] = it }
           if (entry.newer) needsUpdate++
@@ -294,6 +325,7 @@ class LiveListClient(private val cacheDir: File) {
       )
       LiveListResult(
         models = models,
+        api = api,
         notes = notes,
         folded = folded,
         gatedRepos = gatedRepos,
@@ -371,6 +403,7 @@ class LiveListClient(private val cacheDir: File) {
   /** One shelf file: the model, the line under it, needs a newer app, why it is folded (or null). */
   private data class ShelfEntry(
     val model: AllowedModel,
+    val api: ShelfApiMeta,
     val note: String,
     val newer: Boolean,
     val fold: FoldReason?,
@@ -429,11 +462,16 @@ class LiveListClient(private val cacheDir: File) {
       if (sliderMax != null) maxTokens = maxTokens.coerceIn(MAX_TOKENS_SLIDER_MIN, sliderMax)
       val minRuntime = v?.str("min_runtime_version")
       val newer = needsNewerRuntime(minRuntime)
-      val stateful =
-        modelLevel.bool("stateful") == true ||
+      val statefulWhy =
+        when {
+          modelLevel.bool("stateful") == true -> "${defaultsSource.label} says stateful: true"
           (v?.arr("known_issues")?.strings() ?: emptyList()).any {
             it.contains("new Engine for each conversation", ignoreCase = true)
-          }
+          } ->
+            "${defaultsSource.label} known_issues: \"Create a new Engine for each conversation\""
+          else -> null
+        }
+      val stateful = statefulWhy != null
       val check = qualifyingCheck(v, topK, topP, temperature)
       val fold =
         when {
@@ -543,7 +581,24 @@ class LiveListClient(private val cacheDir: File) {
           "temperature ${temperature ?: "app"}, " +
           (fold?.let { "folded: ${it.badge}" } ?: "main shelf: checked on ${checkText(check!!)}"),
       )
-      out.add(ShelfEntry(model = model, note = note, newer = newer, fold = fold))
+      val api =
+        ShelfApiMeta(
+          topK = topK,
+          topP = topP,
+          temperature = temperature,
+          samplerSource =
+            "${defaultsSource.label} (session_defaults" +
+              (if (samplerSource != null) ", from $samplerSource" else "") +
+              ")",
+          stateful = stateful,
+          statefulWhy = statefulWhy,
+          requestTimeoutS = sessionDefaults?.int("request_timeout_s"),
+          maxOutputTokensMin = sessionDefaults?.int("max_output_tokens_min"),
+          contextLength = context,
+          sha256 = files.sha256s[file],
+          checked = check?.let { checkText(it) },
+        )
+      out.add(ShelfEntry(model = model, api = api, note = note, newer = newer, fold = fold))
     }
     return out
   }

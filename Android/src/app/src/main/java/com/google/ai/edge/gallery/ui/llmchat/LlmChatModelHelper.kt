@@ -43,6 +43,7 @@ import com.google.ai.edge.gallery.runtime.EXTRA_CONTEXT_MAX_OUTPUT_TOKENS
 import com.google.ai.edge.gallery.runtime.LlmConversationInstance
 import com.google.ai.edge.gallery.runtime.LlmModelHelper
 import com.google.ai.edge.gallery.runtime.ResultListener
+import com.google.ai.edge.gallery.server.EngineOwnership
 import com.google.ai.edge.litertlm.Backend
 import com.google.ai.edge.litertlm.Content
 import com.google.ai.edge.litertlm.Contents
@@ -126,6 +127,16 @@ object LlmChatModelHelper : LlmModelHelper {
       return
     }
     model.markInitializationStarted()
+    // Model Shelf: one engine per model file; the local API may hold this one (DESIGN.md §g-2).
+    if (EngineOwnership.apiHolds(model.getPath(context = context))) {
+      val message =
+        "The local API is using this model. Stop the local API in Settings > Local API to chat " +
+          "with the model here."
+      Log.i(TAG, "'${model.name}': $message")
+      model.markInitializationFailed(message)
+      onDone(message)
+      return
+    }
     // Prepare options.
     val maxTokens =
       model.getIntConfigValue(key = ConfigKeys.MAX_TOKENS, defaultValue = DEFAULT_MAX_TOKEN)
@@ -236,6 +247,7 @@ object LlmChatModelHelper : LlmModelHelper {
           metricsTracker = metricsTracker,
         )
       )
+      EngineOwnership.chatLoaded(model.name, modelPath)
     } catch (e: Exception) {
       val errorMsg = cleanUpMediapipeTaskErrorMessage(e.message ?: "Unknown error")
       model.markInitializationFailed(errorMsg)
@@ -378,6 +390,7 @@ object LlmChatModelHelper : LlmModelHelper {
     } catch (e: Exception) {
       Log.e(TAG, "Failed to close the engine: ${e.message}")
     }
+    EngineOwnership.chatReleased(model.name)
 
     instance.metricsTracker?.resetSession()
     instance.metricsTracker?.close()

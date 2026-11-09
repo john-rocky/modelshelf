@@ -28,6 +28,8 @@
     <uses-permission android:name="android.permission.READ_CALENDAR" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
+    <!-- Model Shelf: the local API's foreground service (DESIGN.md §g-2). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
@@ -116,6 +118,33 @@
             android:exported="false"
             tools:node="merge">
         </service>
+
+        <!-- Model Shelf: the local API (DESIGN.md §g-2). HTTP on 127.0.0.1:11434 while this
+             service runs; other apps get a token through ConnectActivity. -->
+        <service
+            android:name="com.google.ai.edge.gallery.server.ApiServerService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Serves on-device model inference to other apps on this device that the user allowed" />
+        </service>
+
+        <activity
+            android:name="com.google.ai.edge.gallery.server.ConnectActivity"
+            android:exported="true"
+            android:theme="@style/Theme.Gallery"
+            android:excludeFromRecents="true">
+            <intent-filter>
+                <action android:name="io.github.johnrocky.modelshelf.action.CONNECT" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name="com.google.ai.edge.gallery.server.LocalApiActivity"
+            android:exported="false"
+            android:theme="@style/Theme.Gallery" />
 
         <receiver
             android:name="com.google.ai.edge.gallery.notifications.NotificationReceiver"

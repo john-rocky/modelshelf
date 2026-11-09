@@ -106,6 +106,8 @@ mlkit-genai-prompt = { group = "com.google.mlkit", name = "genai-prompt", versio
 mcp-kotlin-sdk = { group = "io.modelcontextprotocol", name = "kotlin-sdk", version.ref = "mcp" }
 ktor-client-android = { group = "io.ktor", name = "ktor-client-android", version.ref = "ktor" }
 ktor-client-core = { group = "io.ktor", name = "ktor-client-core", version.ref = "ktor" }
+# Model Shelf: the local API's HTTP server, the same Ktor as the client above.
+ktor-server-cio = { group = "io.ktor", name = "ktor-server-cio", version.ref = "ktor" }
 tasks-vision = { group = "com.google.mediapipe", name = "tasks-vision", version.ref = "tasksVision" }
 tasks-retrieval = { group = "com.google.mediapipe", name = "tasks-retrieval", version.ref = "tasksRetrieval" }
 androidx-media3-exoplayer = { group = "androidx.media3", name = "media3-exoplayer", version.ref = "media3" }
