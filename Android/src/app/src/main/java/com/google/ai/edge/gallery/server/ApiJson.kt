@@ -296,7 +296,11 @@ object ApiJson {
 
   // ---- OpenAI -------------------------------------------------------------------------------
 
-  fun openAiModels(entries: List<ApiModelEntry>): String =
+  /**
+   * GET /v1/models: the chat models, then the speech models; each says which kind it is under
+   * "modelshelf" (OpenAI's list has no field for it).
+   */
+  fun openAiModels(entries: List<ApiModelEntry>, asr: List<AsrEntry> = emptyList()): String =
     JsonObject()
       .apply {
         addProperty("object", "list")
@@ -310,6 +314,27 @@ object ApiJson {
                   addProperty("object", "model")
                   addProperty("created", e.modifiedMs / 1000)
                   addProperty("owned_by", e.repoId.substringBefore('/'))
+                  add("modelshelf", JsonObject().apply { addProperty("kind", "chat") })
+                }
+              )
+            }
+            for (e in asr) {
+              add(
+                JsonObject().apply {
+                  addProperty("id", e.name)
+                  addProperty("object", "model")
+                  addProperty("created", e.modifiedMs / 1000)
+                  addProperty("owned_by", e.name.substringBefore('/'))
+                  add(
+                    "modelshelf",
+                    JsonObject().apply {
+                      addProperty("kind", "transcription")
+                      addProperty("endpoint", "/v1/audio/transcriptions")
+                      addProperty("commit", e.commit)
+                      addProperty("size", e.sizeBytes)
+                      add("languages", JsonArray().apply { e.languages.forEach { add(it) } })
+                    },
+                  )
                 }
               )
             }

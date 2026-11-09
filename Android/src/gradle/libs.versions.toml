@@ -22,6 +22,9 @@ protobufJavaLite = "4.26.1"
 # The app reads this version at run time (BuildConfig.LITERTLM_VERSION) to compare with each
 # model file's min_runtime_version, so this line is the only place to change it.
 litertlm = "0.19.1"
+# LiteRT (Kotlin CompiledModel) for Phonon-2.5-English; the NPU runtime of the Galaxy S26 (SM8850).
+litertRuntime = "2.3.0"
+qnnRuntime = "2.50.0"
 commonmark = "1.0.0-alpha02"
 richtext = "1.0.0-alpha02"
 cameraX = "1.4.2"
@@ -79,6 +82,10 @@ com-google-code-gson = { group = "com.google.code.gson", name = "gson", version.
 androidx-lifecycle-process = { group = "androidx.lifecycle", name = "lifecycle-process", version.ref = "lifecycleProcess" }
 androidx-webkit = { group = "androidx.webkit", name = "webkit", version.ref = "webkit"}
 litertlm = { group = "com.google.ai.edge.litertlm", name = "litertlm-android", version.ref = "litertlm" }
+litert-core = { group = "com.google.ai.edge.litert", name = "litert", version.ref = "litertRuntime" }
+litert-gpu = { group = "com.google.ai.edge.litert", name = "litert-gpu", version.ref = "litertRuntime" }
+litert-npu-qualcomm = { group = "com.google.ai.edge.litert", name = "litert-npu-runtime-qualcomm", version.ref = "litertRuntime" }
+qnn-runtime = { group = "com.qualcomm.qti", name = "qnn-runtime", version.ref = "qnnRuntime" }
 commonmark = { group = "com.halilibo.compose-richtext", name = "richtext-commonmark", version.ref = "commonmark" }
 richtext = { group = "com.halilibo.compose-richtext", name = "richtext-ui-material3", version.ref = "richtext" }
 camerax-core = { group = "androidx.camera", name = "camera-core", version.ref = "cameraX"}

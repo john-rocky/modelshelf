@@ -21,6 +21,7 @@ import android.media.AudioRecord
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import androidx.annotation.VisibleForTesting
+import com.google.ai.edge.gallery.server.makeOrClose
 import com.google.mediapipe.tasks.audio.audiotranscriber.AudioTranscriber
 import com.google.mediapipe.tasks.audio.audiotranscriber.AudioTranscriberResult
 import com.google.mediapipe.tasks.core.BaseOptions
@@ -283,6 +284,32 @@ internal constructor(
     config: AsrPreparationConfig,
     currentGeneration: Long,
   ): AudioTranscribing {
+    // Model Shelf: Phonon-2.5-English is a folder of LiteRT files run by its own pipeline (NPU on
+    // the SM8850, else GPU, else CPU), which loads and warms up in PhononEngine.
+    if (PhononAudioTranscribing.isPhononFile(modelFile)) {
+      currentCoroutineContext().ensureActive()
+      if (engineState.get().prepareGeneration != currentGeneration) {
+        throw CancellationException("Preparation superseded or cancelled")
+      }
+      val instance =
+        try {
+          makeOrClose(
+            engineDispatcher,
+            make = { PhononAudioTranscribing(context) },
+            close = { it.close() },
+          )
+        } catch (e: CancellationException) {
+          throw e
+        } catch (e: Exception) {
+          Log.w(TAG, "Phonon-2.5-English could not load", e)
+          throw AsrServiceError.ModelInitializationFailed(e)
+        }
+      if (engineState.get().prepareGeneration != currentGeneration) {
+        withContext(NonCancellable + engineDispatcher) { runCatching { instance.close() } }
+        throw CancellationException("Preparation superseded or cancelled")
+      }
+      return instance
+    }
     for (delegate in resolveCandidateBackends(config, modelMetadata)) {
       currentCoroutineContext().ensureActive()
       if (engineState.get().prepareGeneration != currentGeneration) {

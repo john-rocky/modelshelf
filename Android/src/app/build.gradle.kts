@@ -66,7 +66,14 @@ android {
     compose = true
     buildConfig = true
   }
-  packaging { jniLibs { pickFirsts.add("**/liblitertlm_jni.so") } }
+  packaging {
+    jniLibs {
+      pickFirsts.add("**/liblitertlm_jni.so")
+      // The NPU runtime finds its dispatch library and the Hexagon skel files in the app's native
+      // library folder, so the libraries are extracted at install.
+      useLegacyPackaging = true
+    }
+  }
 }
 
 kotlin {
@@ -96,6 +103,12 @@ dependencies {
   implementation(libs.androidx.security.crypto)
   implementation(libs.androidx.webkit)
   implementation(libs.litertlm)
+  // Phonon-2.5-English (speech recognition): LiteRT's CompiledModel on the CPU, GPU and, on the
+  // Galaxy S26 (SM8850), the NPU through LiteRT's Qualcomm dispatch and the QNN runtime.
+  implementation(libs.litert.core)
+  implementation(libs.litert.gpu)
+  implementation(libs.litert.npu.qualcomm)
+  implementation(libs.qnn.runtime)
   implementation(libs.commonmark)
   implementation(libs.richtext)
   implementation(libs.camerax.core)

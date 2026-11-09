@@ -7,13 +7,19 @@ One screen: **Connect to Model Shelf**, a prompt, **Ask via Ollama API** and **A
 The answer streams onto the screen with the HTTP status, the time to the first text and the total
 time.
 
+Below them, **Speech to text**: **Pick a WAV file** or **Use the example**, then **Transcribe**.
+The text comes back with the HTTP status, the backend Model Shelf ran the speech model on, the
+audio length, the inference time and the total time. The example is LibriSpeech test-clean
+utterance 5142-33396-0056 (3.1 s, CC BY 4.0, `res/raw/example_librispeech.wav`).
+
 ## Build and run
 
 1. Install Model Shelf (`Android/src` in this repo) and download a model in it.
 2. From this folder: `./gradlew assembleDebug`, then
    `adb install app/build/outputs/apk/debug/app-debug.apk`.
 3. Open Caller Sample, tap **Connect to Model Shelf**, then **Allow** in Model Shelf.
-4. Tap **Ask via Ollama API** or **Ask via OpenAI API**.
+4. Tap **Ask via Ollama API** or **Ask via OpenAI API**, or **Transcribe** with a speech model
+   in Model Shelf.
 
 The app uses only Android's own classes (`HttpURLConnection`, `org.json`); it has no library.
 
@@ -23,9 +29,10 @@ The app uses only Android's own classes (`HttpURLConnection`, `org.json`); it ha
 |---|---|
 | Connect | `startActivityForResult(Intent("io.github.johnrocky.modelshelf.action.CONNECT").setPackage("io.github.johnrocky.modelshelf"))`. Model Shelf names the calling app and asks the user. On **Allow** it starts its local API and returns `RESULT_OK` with the extras `base_url` (`http://127.0.0.1:11434`) and `token`. On **Deny** it returns `RESULT_CANCELED` with `error` = `denied`. |
 | Every request | `Authorization: Bearer <token>`. The token belongs to this app; the user can remove it in Model Shelf (Settings > Local API). |
-| Model list | `GET /api/tags` fills the model field. |
+| Model lists | `GET /api/tags` fills the model field. `GET /v1/models` fills the speech model field: the entries whose `modelshelf.kind` is `transcription`. |
 | Ollama's form | `POST /api/chat` with `"stream": true` and no sampler settings: Model Shelf uses the model's own defaults. The answer comes as one JSON object per line; the last line has `"done": true`. |
 | OpenAI's form | `POST /v1/chat/completions` with `"stream": true` and `"temperature": 0`. The answer comes as server-sent events; the last one is `data: [DONE]`. |
+| Speech to text | `POST /v1/audio/transcriptions`, `multipart/form-data` with `model`, `response_format` = `json` and `file`. The answer is `{"text": "..."}`; the headers `X-ModelShelf-Backend`, `X-ModelShelf-Audio-Ms` and `X-ModelShelf-Inference-Ms` give the backend, the audio length and the inference time. |
 
 What the app shows when a request fails:
 
@@ -34,7 +41,25 @@ What the app shows when a request fails:
 | The token was removed in Model Shelf | HTTP 401 | Tap Connect to Model Shelf to reconnect. |
 | The local API is off | connection refused | Model Shelf's local API is off. Tap Connect to Model Shelf to turn it on. |
 | The model is not on the phone | HTTP 404 and one sentence | That sentence. |
-| Model Shelf is busy with other requests | HTTP 503 and `Retry-After` | Try again in N s. |
+| The file to transcribe is not a WAV file | HTTP 400 and one sentence | That sentence. |
+| Model Shelf is busy with other requests | HTTP 503 and `Retry-After` | Model Shelf's sentence, which says when to try again. |
 
 Plain HTTP to `127.0.0.1` needs `res/xml/network_security_config.xml`, which allows cleartext to
 `127.0.0.1` and `localhost` only. The requests never leave the phone.
+
+## Transcription test harness
+
+For tests only: started with the extra `harness_dir`, the app sends every file in that folder of
+its external files folder through the same request code as **Transcribe**, one at a time, and
+writes one JSON line per request to `results_<folder>.jsonl` next to the folder.
+
+```sh
+adb push audio/ /sdcard/Android/data/io.github.johnrocky.modelshelf.caller/files/audio/
+adb shell am start -S -n io.github.johnrocky.modelshelf.caller/.MainActivity \
+  --es harness_dir audio --es harness_model <speech model> --ez harness_warm true
+adb pull /sdcard/Android/data/io.github.johnrocky.modelshelf.caller/files/results_audio.jsonl
+```
+
+Order: the first WAV file once, not counted (`harness_warm`, default true); every WAV file in name
+order; every other file (Model Shelf should answer HTTP 400); the first WAV file to the model
+`litert-community/not-on-this-phone` (HTTP 404). Connect to Model Shelf in the app first.

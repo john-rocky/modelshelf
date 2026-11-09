@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
   <string name="app_name">Caller Sample</string>
-  <string name="intro">This app has no model of its own. It asks Model Shelf on this phone through Model Shelf\'s local API. Nothing leaves the phone.</string>
+  <string name="intro">This app has no model of its own. It asks Model Shelf on this phone through Model Shelf\'s local API, which runs the models on the phone.</string>
   <string name="connect">Connect to Model Shelf</string>
   <string name="model_label">Model</string>
   <string name="model_hint">A model name from Model Shelf</string>
@@ -11,4 +11,12 @@
   <string name="ask_openai">Ask via OpenAI API</string>
   <string name="ollama_title">Ollama API · POST /api/chat</string>
   <string name="openai_title">OpenAI API · POST /v1/chat/completions</string>
+  <string name="speech_title">Speech to text · POST /v1/audio/transcriptions</string>
+  <string name="speech_intro">Send a WAV file to a speech model in Model Shelf and get its text.</string>
+  <string name="speech_model_label">Speech model</string>
+  <string name="speech_model_hint">A speech model name from Model Shelf</string>
+  <string name="pick_wav">Pick a WAV file</string>
+  <string name="use_example">Use the example</string>
+  <string name="transcribe">Transcribe</string>
+  <string name="example_audio">Example: LibriSpeech test-clean 5142-33396-0056, 3.1 s (CC BY 4.0)</string>
 </resources>

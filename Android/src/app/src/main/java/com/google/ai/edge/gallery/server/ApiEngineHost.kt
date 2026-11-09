@@ -60,7 +60,7 @@ const val STOPPING_MESSAGE = "Model Shelf's local API is stopping."
 
 /**
  * The local API's engine: one LLM loaded at a time, one answer at a time, up to [MAX_WAITING]
- * requests waiting in arrival order.
+ * requests waiting in arrival order. Speech requests ([ApiAsrHost]) take their turns here too.
  *
  * State (LiteRT-LM #3165): the host keeps the conversation it holds and the messages it has seen.
  * A request that repeats them and adds one user message continues that conversation. Any other
@@ -145,7 +145,6 @@ class ApiEngineHost(private val context: Context, private val onStateChanged: ()
     try {
       return turnLock.withLock {
         if (closing) throw stoppingError()
-        unloadJob?.cancel()
         block(SystemClock.elapsedRealtime() - arrived)
       }
     } finally {
@@ -153,8 +152,25 @@ class ApiEngineHost(private val context: Context, private val onStateChanged: ()
     }
   }
 
+  /**
+   * Runs [block] under the turn lock without a place in the queue, for housekeeping such as the
+   * speech model's keep-alive.
+   */
+  suspend fun <T> underTurnLock(block: suspend () -> T): T = turnLock.withLock { block() }
+
+  /** Holds the API's wake lock while [block] runs (a speech request, inside [withTurn]). */
+  suspend fun <T> keepingAwake(timeoutMs: Long, block: suspend () -> T): T {
+    wakeLock.acquire(timeoutMs)
+    try {
+      return block()
+    } finally {
+      if (wakeLock.isHeld) wakeLock.release()
+    }
+  }
+
   /** Loads [entry] (inside [withTurn]) without answering: Ollama's empty /api/chat. */
   suspend fun loadOnly(entry: ApiModelEntry, numCtx: Int?): Long {
+    unloadJob?.cancel()
     val t0 = SystemClock.elapsedRealtime()
     ensureLoaded(entry, numCtx)
     return SystemClock.elapsedRealtime() - t0
@@ -169,6 +185,7 @@ class ApiEngineHost(private val context: Context, private val onStateChanged: ()
     request: ApiRequest,
     reuseEngineForTest: Boolean,
   ): Prepared {
+    unloadJob?.cancel()
     val t0 = SystemClock.elapsedRealtime()
     val l = ensureLoaded(entry, request.numCtx)
     val npu = l.backend == "npu" || l.backend == "tpu"

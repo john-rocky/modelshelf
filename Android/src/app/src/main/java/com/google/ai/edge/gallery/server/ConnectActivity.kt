@@ -96,8 +96,8 @@ class ConnectActivity : ComponentActivity() {
                 style = MaterialTheme.typography.headlineSmall,
               )
               Text(
-                "$label ($caller) will be able to send text to the models you downloaded in " +
-                  "Model Shelf and read the answers, through Model Shelf's local API " +
+                "$label ($caller) will be able to send text and audio to the models you " +
+                  "downloaded in Model Shelf and read the answers, through Model Shelf's local API " +
                   "(${LocalApi.BASE_URL}). The models run on this phone and Model Shelf sends " +
                   "nothing off it; what $label does with the answers is up to $label. You can " +
                   "remove the access in Settings > Local API.",

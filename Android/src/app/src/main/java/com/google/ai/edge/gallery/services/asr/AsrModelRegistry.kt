@@ -22,6 +22,7 @@ import com.google.ai.edge.gallery.data.Accelerator
 import com.google.ai.edge.gallery.data.Model
 import com.google.ai.edge.gallery.data.ModelType
 import com.google.ai.edge.gallery.data.RuntimeType
+import com.google.ai.edge.gallery.speech.PhononFiles
 import java.io.File
 
 /** Canonical model identifiers for ASR engines. */
@@ -102,6 +103,23 @@ object AsrModelRegistry {
    * folders, and standard staging locations.
    */
   fun resolveModelFile(context: Context? = null, modelId: String? = null): File? {
+    // Model Shelf: Phonon-2.5-English (no model list names it; its files are in the app's model
+    // folder). By its own name on any phone that can run one of its encoders, and for the generic
+    // on-device engine on the phone its NPU file is built for.
+    if (context != null) {
+      if (modelId == PhononFiles.DISPLAY_NAME) return PhononFiles.present(context)?.mainFile()
+      if (
+        (modelId.isNullOrEmpty() || modelId == AsrModelIdentifier.SPEECH_PROCESSOR) &&
+          PhononFiles.phoneHasNpuSoc()
+      ) {
+        PhononFiles.present(context)
+          ?.takeIf { PhononFiles.Backend.NPU in it.usable() }
+          ?.mainFile()
+          ?.let {
+            return it
+          }
+      }
+    }
     if (!modelId.isNullOrEmpty() && modelId != AsrModelIdentifier.SPEECH_PROCESSOR) {
       if (context == null) return null
       val path = model(modelId)?.getPath(context)?.takeIf { it.isNotEmpty() } ?: return null
@@ -551,6 +569,7 @@ object AsrModelRegistry {
    */
   fun speechProcessorModel(context: Context? = null, modelId: String? = null): AsrModelMetadata? {
     val modelFile = resolveModelFile(context, modelId) ?: return null
+    if (PhononAudioTranscribing.isPhononFile(modelFile)) return phononModel(context)
     val matchedAllowlistModel =
       when {
         !modelId.isNullOrEmpty() && modelId != AsrModelIdentifier.SPEECH_PROCESSOR -> model(modelId)
@@ -607,6 +626,32 @@ object AsrModelRegistry {
       supportedAccelerators =
         if (isGemma) listOf(Accelerator.GPU) else listOf(Accelerator.GPU, Accelerator.CPU),
       preferredBackend = Accelerator.GPU,
+    )
+  }
+
+  /**
+   * Model Shelf: Phonon-2.5-English's metadata. English only; the encoders its files hold that this
+   * phone can run, the first one preferred (NPU, GPU, CPU).
+   */
+  fun phononModel(context: Context?): AsrModelMetadata {
+    val usable = context?.let { PhononFiles.present(it)?.usable() }.orEmpty()
+    val accelerators =
+      usable.map {
+        when (it) {
+          PhononFiles.Backend.NPU -> Accelerator.NPU
+          PhononFiles.Backend.GPU -> Accelerator.GPU
+          PhononFiles.Backend.CPU -> Accelerator.CPU
+        }
+      }
+    return AsrModelMetadata(
+      name = PhononFiles.DISPLAY_NAME,
+      modelId = AsrModelIdentifier.SPEECH_PROCESSOR,
+      engineType = AsrEngineType.SPEECH_PROCESSOR,
+      isLanguageAutoDetected = false,
+      requiresRepositoryModel = false,
+      supportedLanguages = listOf(AsrDefaults.LANGUAGE_CODE),
+      supportedAccelerators = accelerators.ifEmpty { listOf(Accelerator.CPU) },
+      preferredBackend = accelerators.firstOrNull() ?: Accelerator.CPU,
     )
   }
 
