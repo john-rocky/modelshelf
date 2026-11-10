@@ -28,6 +28,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.SystemClock
 import android.provider.OpenableColumns
+import android.util.Base64
 import android.util.Log
 import android.view.View
 import android.view.WindowInsets
@@ -41,7 +42,6 @@ import java.io.InputStream
 import java.net.ConnectException
 import java.net.HttpURLConnection
 import java.net.SocketTimeoutException
-import java.net.URL
 import java.util.Locale
 import java.util.UUID
 import org.json.JSONArray
@@ -54,10 +54,15 @@ import org.json.JSONObject
  * both streamed, the text of a WAV file (POST /v1/audio/transcriptions), and speech for a text it
  * plays (POST /v1/audio/speech).
  *
+ * Every request goes through [ModelShelfClient]: on one connection it first checks that the server
+ * holds the secret Model Shelf gave this app on Connect, and sends the token, the prompt or the
+ * audio only when it does.
+ *
  * Started with the extra [EXTRA_HARNESS_DIR], it runs a transcription test through the same request
  * code as the Transcribe button (see [startHarness] and the README); with [EXTRA_SPEECH_HARNESS_DIR],
  * a text-to-speech test and its round trip through the code of the Speak and Transcribe buttons
- * (see [startSpeechHarness]).
+ * (see [startSpeechHarness]); with [EXTRA_STALL_HARNESS_DIR], a speech request whose answer it does
+ * not read (see [startStallHarness]).
  */
 class MainActivity : Activity() {
 
@@ -188,7 +193,7 @@ class MainActivity : Activity() {
   }
 
   override fun onDestroy() {
-    track?.let { t -> runCatching { t.stop() }; t.release() }
+    // The worker in play() owns the track and releases it when it sees it is no longer the current one.
     track = null
     super.onDestroy()
   }
@@ -196,11 +201,22 @@ class MainActivity : Activity() {
   private fun startHarnesses(intent: Intent?) {
     startHarness(intent)
     startSpeechHarness(intent)
+    startStallHarness(intent)
   }
 
   private fun baseUrl(): String? = prefs.getString(KEY_BASE_URL, null)
 
   private fun token(): String? = prefs.getString(KEY_TOKEN, null)
+
+  /** The secret Model Shelf gave this app on Connect (32 bytes), or null. */
+  private fun verifyKey(): ByteArray? =
+    prefs.getString(KEY_VERIFY_KEY, null)
+      ?.let { runCatching { Base64.decode(it, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP) }.getOrNull() }
+      ?.takeIf { it.size == 32 }
+
+  /** The client that checks the server first; null when this app has no secret to check it with. */
+  private fun client(baseUrl: String): ModelShelfClient? =
+    verifyKey()?.let { ModelShelfClient(baseUrl, packageName, it) }
 
   private fun showConnection(text: String? = null) {
     connection.text =
@@ -232,10 +248,13 @@ class MainActivity : Activity() {
   private fun connected(resultCode: Int, data: Intent?) {
     val baseUrl = data?.getStringExtra(EXTRA_BASE_URL)
     val token = data?.getStringExtra(EXTRA_TOKEN)
+    val key = data?.getStringExtra(EXTRA_VERIFY_KEY)
     if (resultCode == RESULT_OK && baseUrl != null && token != null) {
-      prefs.edit().putString(KEY_BASE_URL, baseUrl).putString(KEY_TOKEN, token).apply()
-      Log.i(TAG, "connect: connected, base_url $baseUrl")
-      showConnection()
+      val edit = prefs.edit().putString(KEY_BASE_URL, baseUrl).putString(KEY_TOKEN, token)
+      if (key != null) edit.putString(KEY_VERIFY_KEY, key) else edit.remove(KEY_VERIFY_KEY)
+      edit.apply()
+      Log.i(TAG, "connect: connected, base_url $baseUrl, verify key ${if (key != null) "given" else "not given"}")
+      showConnection(if (key == null) NO_KEY else null)
       loadModels()
       return
     }
@@ -319,24 +338,23 @@ class MainActivity : Activity() {
 
   /** The JSON object a GET request answers, or null (logged) when it fails. */
   private fun getJson(baseUrl: String, token: String, path: String): JSONObject? {
-    var conn: HttpURLConnection? = null
+    val client = client(baseUrl)
+    if (client == null) {
+      Log.i(TAG, "GET $path: not sent (no verify key)")
+      return null
+    }
     return try {
-      conn = URL(baseUrl + path).openConnection() as HttpURLConnection
-      conn.connectTimeout = 5_000
-      conn.readTimeout = 30_000
-      conn.setRequestProperty("Authorization", "Bearer $token")
-      val status = conn.responseCode
-      if (status != HttpURLConnection.HTTP_OK) {
-        Log.i(TAG, "GET $path: HTTP $status")
-        null
-      } else {
-        JSONObject(conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() })
+      client.send("GET", path, listOf("Authorization" to "Bearer $token")).use { r ->
+        if (r.status != HttpURLConnection.HTTP_OK) {
+          Log.i(TAG, "GET $path: HTTP ${r.status}")
+          null
+        } else {
+          JSONObject(r.body.readBytes().toString(Charsets.UTF_8))
+        }
       }
     } catch (e: Exception) {
       Log.i(TAG, "GET $path: ${e.javaClass.simpleName}: ${e.message}")
       null
-    } finally {
-      conn?.disconnect()
     }
   }
 
@@ -392,27 +410,30 @@ class MainActivity : Activity() {
     val start = SystemClock.elapsedRealtime()
     // The log carries lengths, not what the user typed or the model answered.
     Log.i(TAG, "${api.label}: POST $baseUrl${api.path} model=$model, prompt ${prompt.length} chars")
-    var conn: HttpURLConnection? = null
+    var response: ModelShelfClient.Response? = null
     try {
-      conn = URL(baseUrl + api.path).openConnection() as HttpURLConnection
-      conn.requestMethod = "POST"
-      conn.connectTimeout = 5_000
+      val client = client(baseUrl) ?: return out.apply { error = NO_KEY }
+      val bytes = body(api, model, prompt).toByteArray(Charsets.UTF_8)
       // Model Shelf may first load the model, or wait for another app's request to finish.
-      conn.readTimeout = 330_000
-      conn.doOutput = true
-      conn.setRequestProperty("Authorization", "Bearer $token")
-      conn.setRequestProperty("Content-Type", "application/json")
-      conn.outputStream.use { it.write(body(api, model, prompt).toByteArray(Charsets.UTF_8)) }
-      out.status = conn.responseCode
-      val shelfHeaders =
-        conn.headerFields.filterKeys { it != null && it.startsWith(SHELF_HEADER, ignoreCase = true) }
-      Log.i(TAG, "${api.label}: HTTP ${out.status} $shelfHeaders")
+      val r =
+        client.send(
+          "POST",
+          api.path,
+          listOf("Authorization" to "Bearer $token", "Content-Type" to "application/json"),
+          bytes.size.toLong(),
+          readTimeoutMs = 330_000,
+        ) {
+          it.write(bytes)
+        }
+      response = r
+      out.status = r.status
+      Log.i(TAG, "${api.label}: HTTP ${out.status} ${r.shelfHeaders()}")
       if (out.status != HttpURLConnection.HTTP_OK) {
-        out.retryAfter = conn.getHeaderField("Retry-After")
-        out.error = errorText(conn.errorStream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty())
+        out.retryAfter = r.header("Retry-After")
+        out.error = errorText(r.body.readBytes().toString(Charsets.UTF_8))
         return out
       }
-      conn.inputStream.bufferedReader(Charsets.UTF_8).use { reader ->
+      r.body.bufferedReader(Charsets.UTF_8).use { reader ->
         while (true) {
           val line = reader.readLine() ?: break
           if (line.isBlank()) continue
@@ -457,6 +478,8 @@ class MainActivity : Activity() {
     } catch (e: ConnectException) {
       out.refused = true
       out.error = API_OFF
+    } catch (e: ModelShelfClient.NotModelShelf) {
+      out.error = e.message
     } catch (e: SocketTimeoutException) {
       out.error = "No answer in time (${e.message})."
     } catch (e: IOException) {
@@ -466,7 +489,7 @@ class MainActivity : Activity() {
     } catch (e: Exception) {
       out.error = "Unexpected: ${e.javaClass.simpleName}: ${e.message}"
     } finally {
-      conn?.disconnect()
+      response?.close()
       out.totalMs = SystemClock.elapsedRealtime() - start
       Log.i(
         TAG,
@@ -523,7 +546,7 @@ class MainActivity : Activity() {
   }
 
   private fun forgetToken() {
-    prefs.edit().remove(KEY_TOKEN).apply()
+    prefs.edit().remove(KEY_TOKEN).remove(KEY_VERIFY_KEY).apply()
     showConnection("Not connected: Model Shelf did not accept this app's token.")
   }
 
@@ -631,8 +654,9 @@ class MainActivity : Activity() {
     val out = Transcript()
     val start = SystemClock.elapsedRealtime()
     Log.i(TAG, "transcribe: POST $baseUrl$TRANSCRIPTIONS model=$model, file ${audio.bytes.size} B")
-    var conn: HttpURLConnection? = null
+    var response: ModelShelfClient.Response? = null
     try {
+      val client = client(baseUrl) ?: return out.apply { error = NO_KEY }
       val boundary = "MSCaller" + UUID.randomUUID().toString().replace("-", "")
       val head =
         (formField(boundary, "model", model) +
@@ -642,34 +666,32 @@ class MainActivity : Activity() {
             "Content-Type: ${if (audio.name.endsWith(".wav", ignoreCase = true)) "audio/wav" else "application/octet-stream"}\r\n\r\n")
           .toByteArray(Charsets.UTF_8)
       val tail = "\r\n--$boundary--\r\n".toByteArray(Charsets.UTF_8)
-      conn = URL(baseUrl + TRANSCRIPTIONS).openConnection() as HttpURLConnection
-      conn.requestMethod = "POST"
-      conn.connectTimeout = 5_000
       // Model Shelf may first load the model, or wait for another app's request to finish.
-      conn.readTimeout = 330_000
-      conn.doOutput = true
-      conn.setFixedLengthStreamingMode(head.size.toLong() + audio.bytes.size + tail.size)
-      conn.setRequestProperty("Authorization", "Bearer $token")
-      conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
-      conn.outputStream.use {
-        it.write(head)
-        it.write(audio.bytes)
-        it.write(tail)
-      }
-      out.status = conn.responseCode
-      for ((key, values) in conn.headerFields) {
-        if (key != null && key.startsWith(SHELF_HEADER, ignoreCase = true)) {
-          out.shelf[key.substring(SHELF_HEADER.length).lowercase(Locale.US)] = values.joinToString(",")
+      val r =
+        client.send(
+          "POST",
+          TRANSCRIPTIONS,
+          listOf("Authorization" to "Bearer $token", "Content-Type" to "multipart/form-data; boundary=$boundary"),
+          head.size.toLong() + audio.bytes.size + tail.size,
+          readTimeoutMs = 330_000,
+        ) {
+          it.write(head)
+          it.write(audio.bytes)
+          it.write(tail)
         }
-      }
+      response = r
+      out.status = r.status
+      out.shelf.putAll(r.shelfHeaders())
       if (out.status != HttpURLConnection.HTTP_OK) {
-        out.error = errorText(conn.errorStream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty())
+        out.error = errorText(r.body.readBytes().toString(Charsets.UTF_8))
         return out
       }
-      out.text = JSONObject(conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }).optString("text")
+      out.text = JSONObject(r.body.readBytes().toString(Charsets.UTF_8)).optString("text")
     } catch (e: ConnectException) {
       out.refused = true
       out.error = API_OFF
+    } catch (e: ModelShelfClient.NotModelShelf) {
+      out.error = e.message
     } catch (e: SocketTimeoutException) {
       out.error = "No answer in time (${e.message})."
     } catch (e: IOException) {
@@ -679,7 +701,7 @@ class MainActivity : Activity() {
     } catch (e: Exception) {
       out.error = "Unexpected: ${e.javaClass.simpleName}: ${e.message}"
     } finally {
-      conn?.disconnect()
+      response?.close()
       out.totalMs = SystemClock.elapsedRealtime() - start
       // The log carries the text's length, not the text.
       Log.i(
@@ -779,36 +801,38 @@ class MainActivity : Activity() {
     val start = SystemClock.elapsedRealtime()
     // The log carries the text's length, not the text.
     Log.i(TAG, "speak: POST $baseUrl$SPEECH model=$model, voice=${voice ?: "(default)"}, $format, text ${text.length} chars")
-    var conn: HttpURLConnection? = null
+    var response: ModelShelfClient.Response? = null
     try {
+      val client = client(baseUrl) ?: return out.apply { error = NO_KEY }
       val body = JSONObject().put("model", model).put("input", text).put("response_format", format)
       if (voice != null) body.put("voice", voice)
       val bytes = body.toString().toByteArray(Charsets.UTF_8)
-      conn = URL(baseUrl + SPEECH).openConnection() as HttpURLConnection
-      conn.requestMethod = "POST"
-      conn.connectTimeout = 5_000
-      // Model Shelf may first load the model, or wait for another app's request to finish.
-      conn.readTimeout = 400_000
-      conn.doOutput = true
-      conn.setFixedLengthStreamingMode(bytes.size)
-      conn.setRequestProperty("Authorization", "Bearer $token")
-      conn.setRequestProperty("Content-Type", "application/json")
-      conn.outputStream.use { it.write(bytes) }
-      out.status = conn.responseCode
-      for ((key, values) in conn.headerFields) {
-        if (key != null && key.startsWith(SHELF_HEADER, ignoreCase = true)) {
-          out.shelf[key.substring(SHELF_HEADER.length).lowercase(Locale.US)] = values.joinToString(",")
+      // A WAV answer comes after the whole text is spoken (up to Model Shelf's 300 s limit), and
+      // Model Shelf may first load the model or wait for another app's request to finish.
+      val r =
+        client.send(
+          "POST",
+          SPEECH,
+          listOf("Authorization" to "Bearer $token", "Content-Type" to "application/json"),
+          bytes.size.toLong(),
+          readTimeoutMs = 400_000,
+        ) {
+          it.write(bytes)
         }
-      }
+      response = r
+      out.status = r.status
+      out.shelf.putAll(r.shelfHeaders())
       if (out.status != HttpURLConnection.HTTP_OK) {
-        out.retryAfter = conn.getHeaderField("Retry-After")
-        out.error = errorText(conn.errorStream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty())
+        out.retryAfter = r.header("Retry-After")
+        out.error = errorText(r.body.readBytes().toString(Charsets.UTF_8))
         return out
       }
-      out.bytes = conn.inputStream.use { it.readBytes() }
+      out.bytes = r.body.readBytes()
     } catch (e: ConnectException) {
       out.refused = true
       out.error = API_OFF
+    } catch (e: ModelShelfClient.NotModelShelf) {
+      out.error = e.message
     } catch (e: SocketTimeoutException) {
       out.error = "No answer in time (${e.message})."
     } catch (e: IOException) {
@@ -816,7 +840,7 @@ class MainActivity : Activity() {
     } catch (e: Exception) {
       out.error = "Unexpected: ${e.javaClass.simpleName}: ${e.message}"
     } finally {
-      conn?.disconnect()
+      response?.close()
       out.totalMs = SystemClock.elapsedRealtime() - start
       Log.i(
         TAG,
@@ -869,7 +893,8 @@ class MainActivity : Activity() {
   private fun play(wav: ByteArray): String {
     val pcm = wavData(wav) ?: return "not played: the answer is not a 16-bit mono WAV file"
     if (pcm.bytes.isEmpty()) return "not played: no audio"
-    track?.let { old -> runCatching { old.stop() }; old.release() }
+    // The thread that plays the previous track sees it is no longer the current one and releases it.
+    track = null
     val t =
       try {
         AudioTrack.Builder()
@@ -895,16 +920,27 @@ class MainActivity : Activity() {
       }
     track = t
     val frames = pcm.bytes.size / 2
-    t.write(pcm.bytes, 0, pcm.bytes.size)
-    Log.i(TAG, "speak: playing ${frames} frames at ${pcm.rateHz} Hz")
-    t.play()
-    val deadline = SystemClock.elapsedRealtime() + frames * 1000L / pcm.rateHz + 2_000
-    while (t.playbackHeadPosition < frames && SystemClock.elapsedRealtime() < deadline && track === t) {
-      SystemClock.sleep(50)
+    // This thread owns the track and releases it: the activity only lets go of it (onDestroy, or the
+    // next Speak), so the track is never released under this loop.
+    var played = 0
+    try {
+      t.write(pcm.bytes, 0, pcm.bytes.size)
+      Log.i(TAG, "speak: playing ${frames} frames at ${pcm.rateHz} Hz")
+      t.play()
+      val deadline = SystemClock.elapsedRealtime() + frames * 1000L / pcm.rateHz + 2_000
+      while (t.playbackHeadPosition < frames && SystemClock.elapsedRealtime() < deadline && track === t) {
+        SystemClock.sleep(50)
+      }
+      played = t.playbackHeadPosition
+    } catch (e: IllegalStateException) {
+      Log.i(TAG, "speak: the track stopped: ${e.message}")
+    } finally {
+      runCatching { t.stop() }
+      t.release()
+      if (track === t) track = null
     }
-    val done = t.playbackHeadPosition >= frames
-    Log.i(TAG, "speak: played ${t.playbackHeadPosition} of $frames frames")
-    return if (done) "played" else "stopped"
+    Log.i(TAG, "speak: played $played of $frames frames")
+    return if (played >= frames) "played" else "stopped"
   }
 
   private class Pcm(val bytes: ByteArray, val rateHz: Int)
@@ -1151,6 +1187,107 @@ class MainActivity : Activity() {
   }
 
   /**
+   * Started with [EXTRA_STALL_HARNESS_DIR] = a folder holding text.txt, it plays an app that stopped
+   * reading: it sends the text as one speech request (WAV) through [ModelShelfClient] (the check
+   * first), then reads nothing for [EXTRA_STALL_HOLD_S] seconds (default 240). Then it reads what it
+   * can and writes stall_<folder>.json next to the folder: the status and Content-Length it got,
+   * the bytes, and how the read ended (Model Shelf cuts an answer nobody reads).
+   */
+  private fun startStallHarness(intent: Intent?) {
+    val dirName = harnessFolder(intent, EXTRA_STALL_HARNESS_DIR) ?: return
+    val ttsModel = intent?.getStringExtra(EXTRA_SPEECH_HARNESS_TTS) ?: ttsModelField.text.toString().trim()
+    val holdS = intent?.getIntExtra(EXTRA_STALL_HOLD_S, 240) ?: 240
+    val baseUrl = baseUrl()
+    val token = token()
+    val root = getExternalFilesDir(null)
+    val text = root?.let { File(File(it, dirName), "text.txt") }?.takeIf { it.isFile }?.readText()?.trim().orEmpty()
+    val client = baseUrl?.let { client(it) }
+    val why =
+      when {
+        harnessRunning -> "a harness is running"
+        baseUrl == null || token == null -> "not connected"
+        client == null -> "no verify key"
+        ttsModel.isEmpty() -> "no voice model"
+        text.isEmpty() -> "no text.txt in $dirName"
+        else -> null
+      }
+    if (why != null || root == null || client == null || token == null) {
+      Log.i(TAG, "stall harness: not started ($why)")
+      speakStatus.text = "Stall test harness: not started ($why)."
+      return
+    }
+    harnessRunning = true
+    speakButton.isEnabled = false
+    speakStatus.text = "Stall test harness: sending ${text.length} characters, then not reading for $holdS s…"
+    Thread(
+        {
+          val result = JSONObject().put("chars", text.length).put("model", ttsModel).put("hold_s", holdS)
+          val t0 = SystemClock.elapsedRealtime()
+          var socket: java.net.Socket? = null
+          try {
+            val body =
+              JSONObject().put("model", ttsModel).put("input", text).put("response_format", FORMAT_WAV).toString()
+                .toByteArray(Charsets.UTF_8)
+            val opened =
+              client.open(
+                "POST",
+                SPEECH,
+                listOf("Authorization" to "Bearer $token", "Content-Type" to "application/json"),
+                body.size.toLong(),
+              ) {
+                it.write(body)
+              }
+            socket = opened.socket
+            result.put("sent_ms", SystemClock.elapsedRealtime() - t0)
+            Log.i(TAG, "stall harness: sent ${text.length} characters; not reading for $holdS s")
+            SystemClock.sleep(holdS * 1000L)
+            socket.soTimeout = 5_000
+            val buf = ByteArray(64 * 1024)
+            val head = ByteArrayOutputStream()
+            var got = 0L
+            val ended =
+              try {
+                while (true) {
+                  val n = opened.input.read(buf)
+                  if (n < 0) break
+                  if (head.size() < 4096) head.write(buf, 0, minOf(n, 4096 - head.size()))
+                  got += n
+                }
+                "end of stream"
+              } catch (e: SocketTimeoutException) {
+                "no byte for 5 s (the connection is still open)"
+              } catch (e: IOException) {
+                "${e.javaClass.simpleName}: ${e.message}"
+              }
+            val headText = head.toString("ISO-8859-1")
+            val headEnd = headText.indexOf("\r\n\r\n")
+            result
+              .put("status", Regex("^HTTP/1\\.1 (\\d{3})").find(headText)?.groupValues?.get(1) ?: JSONObject.NULL)
+              .put("content_length", Regex("(?im)^content-length:\\s*(\\d+)").find(headText)?.groupValues?.get(1) ?: JSONObject.NULL)
+              .put("bytes_after_hold", got)
+              .put("body_bytes_after_hold", if (headEnd >= 0) got - headEnd - 4 else JSONObject.NULL)
+              .put("read_ended", ended)
+          } catch (e: Exception) {
+            result.put("error", "${e.javaClass.simpleName}: ${e.message}")
+          } finally {
+            runCatching { socket?.close() }
+          }
+          result.put("total_ms", SystemClock.elapsedRealtime() - t0)
+          val file = File(root, "stall_$dirName.json")
+          file.writeText(result.toString(2))
+          Log.i(TAG, "stall harness: done, $result")
+          runOnUiThread {
+            harnessRunning = false
+            speakButton.isEnabled = true
+            speakStatus.text = "Stall test harness done; the result is in ${file.name}."
+          }
+        },
+        "stall-harness",
+      )
+      .start()
+  }
+
+  /**
    * The harness folder an intent names in [extra], or null. This activity is the exported launcher,
    * so any app can start it: the harnesses run only in a debuggable build, and only on one plain
    * folder name inside this app's external files folder (no "/", not "." or "..").
@@ -1194,10 +1331,13 @@ class MainActivity : Activity() {
     const val EXTRA_BASE_URL = "base_url"
     const val EXTRA_TOKEN = "token"
     const val EXTRA_ERROR = "error"
+    /** The secret Model Shelf gives on Allow (base64url, 32 bytes), to check the server with. */
+    const val EXTRA_VERIFY_KEY = "verify_key"
     const val REQUEST_CONNECT = 1
     const val REQUEST_PICK_AUDIO = 2
     const val KEY_BASE_URL = "base_url"
     const val KEY_TOKEN = "token"
+    const val KEY_VERIFY_KEY = "verify_key"
     const val KEY_MODEL = "model"
     const val KEY_SPEECH_MODEL = "speech_model"
     const val KEY_TTS_MODEL = "tts_model"
@@ -1211,6 +1351,8 @@ class MainActivity : Activity() {
     const val MAX_AUDIO_BYTES = 25 * 1024 * 1024 - 64 * 1024
     const val EXAMPLE_NAME = "example_librispeech.wav"
     const val API_OFF = "Model Shelf's local API is off. Tap Connect to Model Shelf to turn it on."
+    const val NO_KEY =
+      "This app has no key to check Model Shelf with (a copied token has none), so nothing was sent; tap Connect to Model Shelf."
     const val TOKEN_REFUSED =
       "HTTP 401 · Model Shelf did not accept this app's token. Tap Connect to Model Shelf to reconnect."
     /** Test harness extras (adb shell am start ... --es harness_dir <folder>). */
@@ -1226,5 +1368,7 @@ class MainActivity : Activity() {
     const val EXTRA_SPEECH_HARNESS_ASR = "speech_harness_asr_model"
     const val EXTRA_SPEECH_HARNESS_VOICE = "speech_harness_voice"
     const val NO_SUCH_VOICE = "no_such_voice"
+    const val EXTRA_STALL_HARNESS_DIR = "stall_harness_dir"
+    const val EXTRA_STALL_HOLD_S = "stall_hold_s"
   }
 }
