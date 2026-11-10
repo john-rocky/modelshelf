@@ -130,7 +130,7 @@ abstract class BaseLlmChatTask(
     model: Model,
     onDone: () -> Unit,
   ) {
-    executor.cleanUp(onDone = onDone)
+    executor.cleanUp(model = model, onDone = onDone)
   }
 
   @Composable
@@ -298,7 +298,7 @@ constructor(
     model: Model,
     onDone: () -> Unit,
   ) {
-    executor.cleanUp(onDone = onDone)
+    executor.cleanUp(model = model, onDone = onDone)
   }
 
   @Composable
@@ -393,7 +393,7 @@ constructor(
     model: Model,
     onDone: () -> Unit,
   ) {
-    executor.cleanUp(onDone = onDone)
+    executor.cleanUp(model = model, onDone = onDone)
   }
 
   @Composable

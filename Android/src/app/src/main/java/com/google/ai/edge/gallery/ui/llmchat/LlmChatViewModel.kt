@@ -75,6 +75,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.onEach
@@ -288,8 +289,15 @@ open class LlmChatViewModelBase(
       val start = System.currentTimeMillis()
 
       // Run inference.
-      runtimeExecutor.executeStream(context = executionContext, request = request).collect { event
-        ->
+      // Model Shelf: a stream that fails goes to the chat's error path (it shows the error and loads
+      // the model again) instead of ending the process with every app's local API (D-614 round 10d).
+      runtimeExecutor
+        .executeStream(context = executionContext, request = request)
+        .catch { e ->
+          Log.e(TAG, "The answer stream failed", e)
+          emit(AgentEvent.Error(errorMessage = e.message ?: "The answer failed."))
+        }
+        .collect { event ->
         when (event) {
           is AgentEvent.LoopInitiated -> {}
           is AgentEvent.StreamToken -> {

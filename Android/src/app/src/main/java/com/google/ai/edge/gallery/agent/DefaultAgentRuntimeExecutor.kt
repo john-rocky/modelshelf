@@ -94,9 +94,12 @@ open class DefaultAgentRuntimeExecutor(
         enableConversationConstrainedDecoding = config.enableConversationConstrainedDecoding,
       )
 
-    activeSession.set(
+    // Model Shelf: the session is stored only when the model loaded (D-614 round 10d). A refused or
+    // failed load (another chat answers, the local API holds the file) leaves the session of the
+    // chat that has a model; before, it replaced it, and that chat's clean-up then took the
+    // refused model's session.
+    val newSession =
       ActiveSession(sessionConfig = sessionConfig, toolExecutionContext = executionContext)
-    )
 
     toolDispatcher.setupExecutionContext(
       tools = toolsProvider.getAvailableTools(),
@@ -114,10 +117,16 @@ open class DefaultAgentRuntimeExecutor(
       supportAudio = config.supportAudio,
       onDone = { error ->
         if (
-          !wasModelInitialized &&
+          error.isEmpty() &&
             config.model.initStatusFlow.value is Model.InitializationStatus.Initialized
         ) {
-          llmSessionManager.setSessionConfig(sessionId = effectiveSessionId, config = sessionConfig)
+          activeSession.set(newSession)
+          if (!wasModelInitialized) {
+            llmSessionManager.setSessionConfig(
+              sessionId = effectiveSessionId,
+              config = sessionConfig,
+            )
+          }
         }
         onDone(error)
       },
@@ -127,7 +136,11 @@ open class DefaultAgentRuntimeExecutor(
       initialMessages = config.initialMessages,
     )
 
-    if (wasModelInitialized) {
+    if (
+      wasModelInitialized &&
+        config.model.initStatusFlow.value is Model.InitializationStatus.Initialized
+    ) {
+      activeSession.set(newSession)
       llmSessionManager.resetSession(
         sessionId = effectiveSessionId,
         config = sessionConfig,
@@ -147,8 +160,18 @@ open class DefaultAgentRuntimeExecutor(
   ): Flow<AgentEvent> = callbackFlow {
     emitEvent(AgentEvent.LoopInitiated(request = request))
 
-    val session =
-      activeSession.get() ?: error("Model not initialized in DefaultAgentRuntimeExecutor")
+    // Model Shelf: with no session (its load was refused, or another screen's clean-up took it) the
+    // question ends in an error, which the chat shows and answers by loading its model again; it
+    // threw before, and nothing caught it, so the process ended with every app's local API (D-614
+    // round 10d).
+    val session = activeSession.get()
+    if (session == null) {
+      Log.w(TAG, "A question with no session: $NO_SESSION")
+      emitEvent(AgentEvent.Error(errorMessage = NO_SESSION))
+      close()
+      awaitClose {}
+      return@callbackFlow
+    }
     val curModel = session.sessionConfig.model
 
     toolDispatcher.setupExecutionContext(
@@ -167,9 +190,14 @@ open class DefaultAgentRuntimeExecutor(
         ?.mapNotNull { (k, v) -> if (k is String && v is String) k to v else null }
         ?.toMap() ?: emptyMap()
     val sessionId =
-      (request.metadata[AgentRequest.SESSION_ID] as? String)
-        ?: llmSessionManager.activeSessionId
-        ?: error("No active session in LlmSessionManager")
+      (request.metadata[AgentRequest.SESSION_ID] as? String) ?: llmSessionManager.activeSessionId
+    if (sessionId == null) {
+      Log.w(TAG, "A question with no session id: $NO_SESSION")
+      emitEvent(AgentEvent.Error(errorMessage = NO_SESSION))
+      close()
+      awaitClose {}
+      return@callbackFlow
+    }
 
     val resultListener = { partialResult: String, done: Boolean, partialThinking: String? ->
       if (!partialResult.startsWith("<ctrl")) {
@@ -284,15 +312,25 @@ open class DefaultAgentRuntimeExecutor(
     )
   }
 
-  override fun cleanUp(onDone: () -> Unit) {
-    val session = activeSession.getAndSet(null)
-    if (session == null) {
+  override fun cleanUp(onDone: () -> Unit) = cleanUp(model = null, onDone = onDone)
+
+  // Model Shelf: the session is dropped only when it is [model]'s (D-614 round 10d). The clean-up of
+  // one screen's model (late, after the chat below loaded another model) took the executor's one
+  // session before, whatever model it was asked about, and that chat's next question crashed.
+  override fun cleanUp(model: Model?, onDone: () -> Unit) {
+    val session = activeSession.get()
+    val sessionModel = session?.sessionConfig?.model
+    if (session != null && (model == null || sessionModel === model)) {
+      activeSession.compareAndSet(session, null)
+    }
+    val target = model ?: sessionModel
+    if (target == null) {
       onDone()
       return
     }
-    session.sessionConfig.model.runtimeHelper.cleanUp(
-      model = session.sessionConfig.model,
-      onDone = onDone,
-    )
+    target.runtimeHelper.cleanUp(model = target, onDone = onDone)
   }
 }
+
+/** Model Shelf: what a question gets when the executor holds no session. */
+internal const val NO_SESSION = "The model of this chat is not loaded."

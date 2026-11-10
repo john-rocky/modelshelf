@@ -72,7 +72,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.DisposableHandle
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 private const val TAG = "AGLlmChatModelHelper"
@@ -336,19 +335,7 @@ object LlmChatModelHelper : LlmModelHelper {
     CoroutineScope(ioDispatcher).launch {
       for (instance in engines) {
         val model = chatEngines.ownerOf(instance) ?: continue
-        if (instance.turnsInFlight.get() > 0) {
-          Log.i(TAG, "Stopping the answer of '${model.name}' ($why)")
-          stopInstance(instance)
-          var waitedMs = 0L
-          while (instance.turnsInFlight.get() > 0 && waitedMs < ANSWER_STOP_WAIT_MS) {
-            delay(50)
-            waitedMs += 50
-          }
-          if (instance.turnsInFlight.get() > 0) {
-            Log.w(TAG, "'${model.name}' still answers $ANSWER_STOP_WAIT_MS ms after the stop")
-            continue
-          }
-        }
+        if (!answerEnded(model, instance, why)) continue
         if (chatEngines.close(instance)) {
           Log.i(TAG, "Clean up model '${model.name}' done ($why)")
           logLiveChatEngines("after closing the engine of '${model.name}'")
@@ -478,11 +465,23 @@ object LlmChatModelHelper : LlmModelHelper {
 
   @OptIn(ExperimentalApi::class) // opt-in experimental flags
   override fun cleanUp(model: Model, onDone: () -> Unit) {
-    if (model.instance == null) {
+    // Model Shelf: the engine is read once (a close on another thread between two reads made the
+    // cast throw), and a model with no engine (a refused load, an engine another chat's load
+    // closed) is done at once: onDone was not called then, and the callers that go on in it (the
+    // chat's error path that loads the model again) stopped there (D-614 round 10d).
+    val instance = model.instance as? LlmModelInstance
+    if (instance == null) {
+      onDone()
       return
     }
 
-    val instance = model.instance as LlmModelInstance
+    // Model Shelf: an answer still running (Stop was pressed, its turn is still winding down) is
+    // stopped and given time to end before its engine is closed; an engine that still answers then
+    // is left to the next chat's load (as closeEnginesOf does), never closed while it answers.
+    if (!answerEnded(model, instance, why = "its screen is left")) {
+      onDone()
+      return
+    }
 
     // Model Shelf: closed through the chat-engine slot, which closes each engine once: the slot may
     // have closed this one already (another chat opened, or the screen is gone).
@@ -546,6 +545,27 @@ object LlmChatModelHelper : LlmModelHelper {
     }
 
     Log.d(TAG, "Clean up done.")
+  }
+
+  /**
+   * Model Shelf: true when [instance] answers nothing (any more): an answer it runs is stopped and
+   * gets [ANSWER_STOP_WAIT_MS] to end. False when it still answers then (it is not closed). Blocks;
+   * runs off the main thread (the leave clean-up, closeEnginesOf).
+   */
+  private fun answerEnded(model: Model, instance: LlmModelInstance, why: String): Boolean {
+    if (instance.turnsInFlight.get() <= 0) return true
+    Log.i(TAG, "Stopping the answer of '${model.name}' ($why)")
+    stopInstance(instance)
+    var waitedMs = 0L
+    while (instance.turnsInFlight.get() > 0 && waitedMs < ANSWER_STOP_WAIT_MS) {
+      Thread.sleep(50)
+      waitedMs += 50
+    }
+    if (instance.turnsInFlight.get() > 0) {
+      Log.w(TAG, "'${model.name}' still answers $ANSWER_STOP_WAIT_MS ms after the stop")
+      return false
+    }
+    return true
   }
 
   // Model Shelf: stops what [instance] answers now (the main conversation and any ephemeral one).

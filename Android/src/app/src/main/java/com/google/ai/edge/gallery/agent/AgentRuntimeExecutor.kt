@@ -17,6 +17,7 @@
 package com.google.ai.edge.gallery.agent
 
 import android.content.Context
+import com.google.ai.edge.gallery.data.Model
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -130,4 +131,11 @@ interface AgentRuntimeExecutor {
    * @param onDone callback invoked once resource teardown is completed
    */
   fun cleanUp(onDone: () -> Unit = {})
+
+  /**
+   * Model Shelf: cleans up [model] (its engine is closed); the executor's session is dropped only
+   * when it is [model]'s, so the clean-up of one screen's model never takes the session of a chat
+   * that loaded another model since (D-614 round 10d). A null [model] is [cleanUp].
+   */
+  fun cleanUp(model: Model?, onDone: () -> Unit = {}) = cleanUp(onDone)
 }
