@@ -410,6 +410,27 @@ fun SettingsDialog(
             }
           }
 
+          // Model Shelf: the two pages the home screen's intro linked to; each opens in a Custom Tab
+          // (D-614 round 10d). Not merged: each link stays its own node.
+          Column(modifier = Modifier.fillMaxWidth()) {
+            Text(
+              stringResource(R.string.settings_dialog_learn_more_title),
+              style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Medium),
+            )
+            ClickableLink(
+              url = "https://huggingface.co/litert-community",
+              linkText = stringResource(R.string.litert_community_label),
+              textAlign = TextAlign.Start,
+              modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+            )
+            ClickableLink(
+              url = "https://ai.google.dev/gemma",
+              linkText = stringResource(R.string.gemma4_label),
+              textAlign = TextAlign.Start,
+              modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+            )
+          }
+
           // Tos
           Column(modifier = Modifier.fillMaxWidth().semantics(mergeDescendants = true) {}) {
             Text(

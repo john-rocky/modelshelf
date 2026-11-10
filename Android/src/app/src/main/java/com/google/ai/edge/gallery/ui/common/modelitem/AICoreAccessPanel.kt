@@ -16,9 +16,6 @@
 
 package com.google.ai.edge.gallery.ui.common.modelitem
 
-import android.content.ActivityNotFoundException
-import android.content.Intent
-import android.util.Log
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.PaddingValues
@@ -36,12 +33,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
-import androidx.core.net.toUri
 import com.google.ai.edge.gallery.R
 import com.google.ai.edge.gallery.data.ModelUnavailability
 import com.google.ai.edge.gallery.data.ModelUnavailabilityReason
-
-private const val TAG = "AGAICoreAccessPanel"
+import com.google.ai.edge.gallery.ui.common.openExternalPage
 
 private const val AICORE_DEV_PREVIEW_URL =
   "https://developers.google.com/ml-kit/genai/aicore-dev-preview"
@@ -109,14 +104,8 @@ fun ModelUnavailabilityPanel(unavailability: ModelUnavailability, fallbackGuideU
           R.string.aicore_access_panel_button
         }
       TextButton(
-        onClick = {
-          try {
-            val intent = Intent(Intent.ACTION_VIEW, guideUrl.toUri())
-            context.startActivity(intent)
-          } catch (e: ActivityNotFoundException) {
-            Log.w(TAG, "No app can open $guideUrl", e)
-          }
-        },
+        // Model Shelf: in a Custom Tab (openExternalPage, D-614 round 10d).
+        onClick = { openExternalPage(context, guideUrl) },
         contentPadding = PaddingValues(horizontal = 8.dp),
       ) {
         Text(

@@ -17,7 +17,6 @@ package com.google.ai.edge.gallery.customtasks.tinygarden
 
 import android.Manifest
 import android.annotation.SuppressLint
-import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.util.Log
@@ -88,7 +87,6 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
-import androidx.core.net.toUri
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.webkit.WebViewAssetLoader
 import com.google.ai.edge.gallery.GalleryEvent
@@ -106,6 +104,7 @@ import com.google.ai.edge.gallery.ui.common.chat.ChatMessageText
 import com.google.ai.edge.gallery.ui.common.chat.ChatMessageWarning
 import com.google.ai.edge.gallery.ui.common.chat.ChatSide
 import com.google.ai.edge.gallery.ui.common.getTaskBgGradientColors
+import com.google.ai.edge.gallery.ui.common.openExternalPage
 import com.google.ai.edge.gallery.ui.common.textandvoiceinput.TextAndVoiceInput
 import com.google.ai.edge.gallery.ui.modelmanager.ModelManagerViewModel
 import com.google.ai.edge.gallery.ui.theme.customColors
@@ -564,14 +563,9 @@ fun MainUi(
                         return false
                       }
 
-                      // If it's an external URL, launch an Android Intent to open it
-                      // in the system's default browser.
-                      try {
-                        val intent = Intent(Intent.ACTION_VIEW, url.toUri())
-                        view?.context?.startActivity(intent)
-                      } catch (e: Exception) {
-                        Log.e(TAG, "Could not open external URL: $url", e)
-                      }
+                      // Model Shelf: an external page opens in a Custom Tab from the activity
+                      // (openExternalPage, D-614 round 10d).
+                      view?.context?.let { openExternalPage(it, url) }
 
                       // Return true to signal that we have handled the URL loading and
                       // the WebView should NOT load it internally.

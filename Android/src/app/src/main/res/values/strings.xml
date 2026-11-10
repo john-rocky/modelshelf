@@ -234,6 +234,7 @@
   <string name="select_downloaded_model" translatable="true" description="Title of a dropdown/dialog to choose from models already downloaded for benchmarking. [CHAR_LIMIT=41]">Select a downloaded model</string>
   <string name="select_model" translatable="true" description="Title of a dropdown/dialog to select a model (e.g., for viewing benchmark results). [CHAR_LIMIT=26]">Select a model</string>
   <string name="selected_count" translatable="true" description="Label showing the count of selected items (e.g., '5 selected'). [CHAR_LIMIT=19]">%d selected</string>
+  <string name="settings_dialog_learn_more_title" translatable="true" description="Header for the section of the Settings dialog that links to the LiteRT community page and the Gemma 4 page. [CHAR_LIMIT=30]">Learn more</string>
   <string name="settings_dialog_tos_title" translatable="true" description="Header for the Terms of Service section in the Settings dialog. [CHAR_LIMIT=30]">Terms of service</string>
   <string name="settings_dialog_view_app_terms_of_service" translatable="true" description="Button label to open and read the application's terms of service. [CHAR_LIMIT=30]">View App Terms of Service</string>
   <string name="settings_dialog_gemma_prohibited_use_policy" translatable="true" description="Link text pointing to the Gemma model's prohibited use policy document. [CHAR_LIMIT=44]">Gemma Prohibited Use Policy</string>

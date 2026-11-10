@@ -25,7 +25,16 @@ import android.os.Build
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.net.toUri
+import com.google.ai.edge.gallery.MainActivity
+import com.google.ai.edge.gallery.data.DEEP_LINK_SCHEME
 import dagger.hilt.android.EntryPointAccessors
+
+/**
+ * Model Shelf: the link a reminder's tap opens: a link of Model Shelf's scheme, else none (D-614
+ * round 10d).
+ */
+internal fun reminderLink(deeplink: String): String? =
+  deeplink.takeIf { it.startsWith("$DEEP_LINK_SCHEME://") }
 
 class NotificationReceiver : BroadcastReceiver() {
   private val DEFAULT_CHANNEL_ID = "ai_edge_gallery_notification_channel"
@@ -48,11 +57,17 @@ class NotificationReceiver : BroadcastReceiver() {
 
     try {
       // Create the intent for when tapping the notification
+      // Model Shelf: a reminder opens Model Shelf only: with its link when the link is of Model
+      // Shelf's scheme, else the app as it is. A link of another kind that the model put into the
+      // reminder's call (any web page) does not open: web pages open only in a Custom Tab from the
+      // app's activity (D-614 round 10d).
+      val ownLink = reminderLink(deeplink)
       val contentIntent =
         Intent(Intent.ACTION_VIEW).apply {
-          if (deeplink.isNotEmpty()) {
-            data = deeplink.toUri()
+          if (ownLink != null) {
+            data = ownLink.toUri()
           }
+          setClass(context, MainActivity::class.java)
           flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
 

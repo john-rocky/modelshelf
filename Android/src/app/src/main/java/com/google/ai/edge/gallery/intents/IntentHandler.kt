@@ -321,7 +321,8 @@ object IntentHandler {
               .appendQueryParameter("query", params.message)
               .build()
               .toString()
-          Log.d(TAG, "Setting constructed deeplink to: $uri")
+          // Model Shelf: the link is not logged: its question is the reminder's text (D-614 round 10d).
+          Log.d(TAG, "Setting the constructed link of the reminder")
           notificationProtoBuilder.setDeeplink(uri)
         } else if (params.task_id != null) {
           val uri =
@@ -331,7 +332,8 @@ object IntentHandler {
               .appendQueryParameter("query", params.message)
               .build()
               .toString()
-          Log.d(TAG, "Setting constructed deeplink to: $uri")
+          // Model Shelf: the link is not logged: its question is the reminder's text (D-614 round 10d).
+          Log.d(TAG, "Setting the constructed link of the reminder")
           notificationProtoBuilder.setDeeplink(uri)
         } else {
           val fallbackUri =
@@ -341,7 +343,7 @@ object IntentHandler {
               .appendQueryParameter("query", params.message)
               .build()
               .toString()
-          Log.d(TAG, "Setting fallback deeplink to: $fallbackUri")
+          Log.d(TAG, "Setting the fallback link of the reminder")
           notificationProtoBuilder.setDeeplink(fallbackUri)
         }
         if (params.year != null) {

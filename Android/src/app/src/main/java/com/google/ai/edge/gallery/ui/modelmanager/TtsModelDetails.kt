@@ -16,10 +16,7 @@
 
 package com.google.ai.edge.gallery.ui.modelmanager
 
-import android.content.ActivityNotFoundException
 import android.content.Context
-import android.content.Intent
-import android.util.Log
 import androidx.annotation.StringRes
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
@@ -78,7 +75,6 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.core.net.toUri
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.google.ai.edge.gallery.R
 import com.google.ai.edge.gallery.data.Model
@@ -87,10 +83,9 @@ import com.google.ai.edge.gallery.services.tts.DEFAULT_TTS_LANGUAGE_CODE
 import com.google.ai.edge.gallery.services.tts.TtsVoicePreviewPhrases
 import com.google.ai.edge.gallery.ui.common.InfoTooltipIconButton
 import com.google.ai.edge.gallery.ui.common.modelitem.ModelItem
+import com.google.ai.edge.gallery.ui.common.openExternalPage
 import com.google.ai.edge.gallery.ui.common.tos.TosViewModel
 import java.util.Locale
-
-private const val TAG = "AGTtsModelDetails"
 
 /** Tabs displayed in [GlobalModelManager] when supplementary models are enabled. */
 internal enum class ModelManagerTab {
@@ -425,13 +420,12 @@ private fun SupplementaryNoticePanel(
   }
 }
 
-/** Opens [url] in the app that handles it, such as the browser or the Play Store. */
+/**
+ * Opens [url]: a Play Store page in the Play Store app, another page in a Custom Tab
+ * (openExternalPage, D-614 round 10d).
+ */
 private fun openUrl(context: Context, url: String) {
-  try {
-    context.startActivity(Intent(Intent.ACTION_VIEW, url.toUri()))
-  } catch (e: ActivityNotFoundException) {
-    Log.w(TAG, "No app can open $url", e)
-  }
+  openExternalPage(context, url)
 }
 
 /**

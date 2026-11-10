@@ -126,7 +126,6 @@ import com.google.ai.edge.gallery.data.CategoryInfo
 import com.google.ai.edge.gallery.data.Task
 import com.google.ai.edge.gallery.ui.common.RevealingText
 import com.google.ai.edge.gallery.ui.common.TaskIcon
-import com.google.ai.edge.gallery.ui.common.buildTrackableUrlAnnotatedString
 import com.google.ai.edge.gallery.ui.common.rememberDelayedAnimationProgress
 import com.google.ai.edge.gallery.ui.common.tos.AppTosDialog
 import com.google.ai.edge.gallery.ui.common.tos.TosViewModel
@@ -573,7 +572,9 @@ private fun AppTitle(enableAnimation: Boolean) {
 
 @Composable
 private fun IntroText(enableAnimation: Boolean) {
-  val litertUrl = "https://huggingface.co/litert-community"
+  // Model Shelf: plain text. Its two links (the LiteRT community page and the Gemma 4 page) moved to
+  // Settings > Learn more: on the home screen a touch meant for the menu or the tiles could open the
+  // browser (D-614 round 10d).
 
   // Intro text animation:
   //
@@ -589,22 +590,11 @@ private fun IntroText(enableAnimation: Boolean) {
       )
     }
 
-  val introText = buildAnnotatedString {
-    val gemma4Url = "https://ai.google.dev/gemma"
+  val introText = buildString {
     append("${stringResource(R.string.gemma4_intro_part_1)} ")
-    append(
-      buildTrackableUrlAnnotatedString(
-        url = litertUrl,
-        linkText = stringResource(R.string.litert_community_label),
-      )
-    )
+    append(stringResource(R.string.litert_community_label))
     append("${stringResource(R.string.gemma4_intro_part_2)} ")
-    append(
-      buildTrackableUrlAnnotatedString(
-        url = gemma4Url,
-        linkText = stringResource(R.string.gemma4_label),
-      )
-    )
+    append(stringResource(R.string.gemma4_label))
     append(".")
   }
   Text(

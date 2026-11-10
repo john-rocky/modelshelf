@@ -38,18 +38,21 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.core.animation.doOnEnd
 import androidx.core.os.bundleOf
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.lifecycle.lifecycleScope
 import com.google.ai.edge.gallery.common.PermissionsResultListener
 import com.google.ai.edge.gallery.common.VirtualDevicePermissionsHost
+import com.google.ai.edge.gallery.ui.common.ExternalPageUriHandler
 import com.google.ai.edge.gallery.ui.common.MobileDataDownloadConfirmationHost
 import com.google.ai.edge.gallery.ui.modelmanager.ModelManagerViewModel
 import com.google.ai.edge.gallery.ui.theme.GalleryTheme
@@ -104,6 +107,10 @@ class MainActivity : ComponentActivity(), VirtualDevicePermissionsHost {
 
       setContent {
         GalleryTheme {
+          // Model Shelf: every link a composable opens goes through openExternalPage: http(s) pages
+          // only, in a Custom Tab from this activity (D-614 round 10d).
+          val uriHandler = remember { ExternalPageUriHandler(this@MainActivity) }
+          CompositionLocalProvider(LocalUriHandler provides uriHandler) {
           Surface(modifier = Modifier.fillMaxSize()) {
             GalleryApp(modelManagerViewModel = modelManagerViewModel)
             // Asks before downloading over mobile data, whichever screen started the download.
@@ -123,6 +130,7 @@ class MainActivity : ComponentActivity(), VirtualDevicePermissionsHost {
                 modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)
               )
             }
+          }
           }
         }
       }
@@ -226,9 +234,5 @@ class MainActivity : ComponentActivity(), VirtualDevicePermissionsHost {
         "device_model" to Build.MODEL,
       ),
     )
-  }
-
-  companion object {
-    private const val TAG = "AGMainActivity"
   }
 }
