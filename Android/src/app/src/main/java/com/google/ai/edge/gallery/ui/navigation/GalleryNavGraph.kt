@@ -805,10 +805,11 @@ private class NavLinkScreens(
     )
   }
 
-  override fun gate(model: Model): String? =
-    LlmChatModelHelper.sentenceInsteadOfLinkedScreen(context, model)
+  // The gate holds the chat-engine slot until endGate: no answer starts while the open screen is
+  // replaced (D-614 round 10d).
+  override fun gate(model: Model): String? = LlmChatModelHelper.holdForLinkedScreen(context, model)
 
-  override fun endGate() {}
+  override fun endGate() = LlmChatModelHelper.releaseLinkedScreenHold()
 
   override fun showSentence(sentence: String) = onSentence(sentence)
 

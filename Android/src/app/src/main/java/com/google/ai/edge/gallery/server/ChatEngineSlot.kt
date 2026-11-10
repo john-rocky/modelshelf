@@ -48,6 +48,12 @@ class ChatEngineSlot<K : Any, I : Any>(
   private var making = false
   private val live = IdentityHashMap<I, K>()
 
+  // Model Shelf (D-614 round 10d): the owner of the engine being made, and whether its screen went
+  // away while it was made ([screensGone]); and whether a link holds the slot ([hold]).
+  private var makingOwner: K? = null
+  private var makingGone = false
+  private var held = false
+
   /** What [make] did. */
   sealed interface Result<out K, out I> {
     /** [engine] is made and alive; the engines of [closedFirst] were closed before it was made. */
@@ -55,6 +61,12 @@ class ChatEngineSlot<K : Any, I : Any>(
 
     /** Nothing was closed or made: the engine of [owner] is answering. */
     data class Answering<K>(val owner: K) : Result<K, Nothing>
+
+    /**
+     * The engine was made, but [owner]'s screen went away while it was made ([screensGone]): it
+     * was closed at once, and no engine is alive.
+     */
+    data class Gone<K>(val owner: K) : Result<K, Nothing>
   }
 
   /** The chat engines alive now: 0 or 1. */
@@ -90,10 +102,18 @@ class ChatEngineSlot<K : Any, I : Any>(
         closing(other)
       }
       making = true
+      makingOwner = owner
+      makingGone = false
     }
     try {
       val engine = create()
       lock.withLock {
+        if (makingGone) {
+          // Model Shelf: its screen is gone for good; no screen would ever close it (D-614 round
+          // 10d, review finding 10).
+          closeEngine(owner, engine)
+          return Result.Gone(owner)
+        }
         live[engine] = owner
         publish(engine)
       }
@@ -101,9 +121,48 @@ class ChatEngineSlot<K : Any, I : Any>(
     } finally {
       lock.withLock {
         making = false
+        makingOwner = null
+        makingGone = false
         madeOrFailed.signalAll()
       }
     }
+  }
+
+  /**
+   * Model Shelf: the screens of the owners [isOwner] picks are gone for good. Returns the engines
+   * they hold now (for the caller to close); an engine still being made for one of them is closed
+   * as soon as it is made ([Result.Gone]).
+   */
+  fun screensGone(isOwner: (K) -> Boolean): List<I> =
+    lock.withLock {
+      if (making && makingOwner?.let(isOwner) == true) makingGone = true
+      live.entries.filter { isOwner(it.value) }.map { it.key }
+    }
+
+  /**
+   * Model Shelf: starts a turn on [engine] under the slot's lock: [start] raises the engine's
+   * "answering" mark, so [make], [anyAnswering] and [hold] see it before anything is sent (D-614
+   * round 10d, review finding 7). Returns null, and [start] does not run, when the engine is not
+   * alive (closed) or the slot is held.
+   */
+  fun <R> startTurn(engine: I, start: () -> R): R? =
+    lock.withLock { if (held || !live.containsKey(engine)) null else start() }
+
+  /**
+   * Model Shelf: holds the slot, unless [refusal] (told whether an engine alive answers, and how
+   * many are alive) gives a reason, which is returned. While the slot is held no turn starts
+   * ([startTurn]); [release] ends it. A link holds it while it replaces the open screen.
+   */
+  fun <R : Any> hold(refusal: (answering: Boolean, liveCount: Int) -> R?): R? =
+    lock.withLock {
+      val reason = refusal(live.keys.any { isAnswering(it) }, live.size)
+      if (reason == null) held = true
+      reason
+    }
+
+  /** Model Shelf: ends [hold]. */
+  fun release() {
+    lock.withLock { held = false }
   }
 
   /** Closes [engine] if it is alive. False when it was closed already, or was never made here. */

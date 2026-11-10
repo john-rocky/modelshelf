@@ -90,6 +90,13 @@ private const val ANOTHER_CHAT_ANSWERS =
 // Model Shelf: how long the answer of a screen that is gone gets to stop before its engine closes.
 private const val ANSWER_STOP_WAIT_MS = 10_000L
 
+// Model Shelf: a load whose screen went away while the engine was made (D-614 round 10d).
+private const val SCREEN_GONE = "The screen of this chat closed while its model loaded."
+
+// Model Shelf: a question on an engine that was closed, or sent while a link replaces the screen
+// (D-614 round 10d); the chat shows it and loads its model again.
+private const val CHAT_ENGINE_CLOSED = "The model of this chat was closed."
+
 /**
  * Holds the runtime state for an initialized LiteRT-LM model.
  *
@@ -316,6 +323,15 @@ object LlmChatModelHelper : LlmModelHelper {
       onDone(ANOTHER_CHAT_ANSWERS)
       return
     }
+    if (made is ChatEngineSlot.Result.Gone<*>) {
+      // Model Shelf: closed once made, its screen being gone (D-614 round 10d, review finding 10).
+      Log.i(TAG, "'${model.name}': $SCREEN_GONE (its engine is closed)")
+      model.markInitializationFailed(SCREEN_GONE)
+      metricsTracker.onModelInitialized()
+      logLiveChatEngines("after closing the engine of '${model.name}' (its screen is gone)")
+      onDone(SCREEN_GONE)
+      return
+    }
     logLiveChatEngines("after creating the engine for '${model.name}'")
     metricsTracker.onModelInitialized()
     onDone("")
@@ -330,7 +346,8 @@ object LlmChatModelHelper : LlmModelHelper {
   fun closeEnginesOf(models: Collection<Model>, why: String) {
     val owners = Collections.newSetFromMap(IdentityHashMap<Model, Boolean>())
     owners.addAll(models)
-    val engines = chatEngines.enginesOf { it in owners }
+    // An engine still being made for one of them is closed as soon as it is made (D-614 round 10d).
+    val engines = chatEngines.screensGone { it in owners }
     if (engines.isEmpty()) return
     CoroutineScope(ioDispatcher).launch {
       for (instance in engines) {
@@ -359,6 +376,26 @@ object LlmChatModelHelper : LlmModelHelper {
         API_HOLDS_MODEL
       else -> null
     }
+
+  /**
+   * Model Shelf: [sentenceInsteadOfLinkedScreen] and, when it is null, a hold on the chat-engine
+   * slot until [releaseLinkedScreenHold], both under the slot's lock: a question sent between the
+   * gate and the switch of screens is not sent (it gets an error), and a question sent before the
+   * gate makes the gate say that a chat answers (D-614 round 10d, review finding 7).
+   */
+  fun holdForLinkedScreen(context: Context, model: Model): String? {
+    val path = model.getPath(context = context)
+    return chatEngines.hold { answering, liveCount ->
+      when {
+        answering -> ANOTHER_CHAT_ANSWERS
+        liveCount > 0 && EngineOwnership.apiHolds(path) -> API_HOLDS_MODEL
+        else -> null
+      }
+    }
+  }
+
+  /** Model Shelf: ends [holdForLinkedScreen]. */
+  fun releaseLinkedScreenHold() = chatEngines.release()
 
   // Model Shelf: the number of chat engines alive in this process (0 or 1), read in the device
   // checks (D-614 round 10c, tools/r10c_engines.py).
@@ -702,12 +739,30 @@ object LlmChatModelHelper : LlmModelHelper {
         }
     }
 
-    // Step 1: Start the turn before processing the input, so its latency includes the input
-    // processing the user waits for.
+    // Model Shelf: an answer of the main conversation counts as answering from here, before its
+    // input is encoded, and the mark goes up under the chat-engine slot's lock: the link gate and
+    // the slot see it before anything is sent, and an engine the slot closed, or the slot while a
+    // link holds it, gets no turn (D-614 round 10d, review finding 7: the mark went up right before
+    // the send, outside the lock).
     if (!isEphemeral) {
-      instance.metricsTracker?.startTurn(conversation.asSession())
+      val started =
+        chatEngines.startTurn(instance) {
+          turnCounted.set(true)
+          instance.turnsInFlight.incrementAndGet()
+        }
+      if (started == null) {
+        Log.i(TAG, "Answer of '${model.name}' not started: $CHAT_ENGINE_CLOSED")
+        onError(CHAT_ENGINE_CLOSED)
+        return
+      }
+      Log.i(TAG, "Answer of '${model.name}' started")
     }
     try {
+      // Step 1: Start the turn before processing the input, so its latency includes the input
+      // processing the user waits for.
+      if (!isEphemeral) {
+        instance.metricsTracker?.startTurn(conversation.asSession())
+      }
       // Step 2: Assemble multimodal prompt attachments (images, audio clips, and text).
       val contents = mutableListOf<Content>()
       for (image in images) {
@@ -731,10 +786,6 @@ object LlmChatModelHelper : LlmModelHelper {
         extraContext[EXTRA_CONTEXT_MAX_OUTPUT_TOKENS]?.toIntOrNull()?.takeIf { it > 0 }
 
       // Step 4: Dispatch asynchronous streaming inference to the native LiteRT-LM engine.
-      if (!isEphemeral && turnCounted.compareAndSet(false, true)) {
-        instance.turnsInFlight.incrementAndGet()
-        Log.i(TAG, "Answer of '${model.name}' started")
-      }
       conversation.sendMessageAsync(
         Contents.of(contents),
         object : MessageCallback {

@@ -204,40 +204,106 @@ class ChatEngineSlotTest {
     assertFalse(EngineOwnership.chatHolds(path(one.name)))
   }
 
+  // Model Shelf round 10d (review finding 18): the engines created and not closed are counted (one
+  // at most at any time, one at the end), and a failure in a screen's thread fails the test.
   @Test
   fun screensOpeningChatsAtOnceNeverHaveTwoEngines() {
     repeat(50) { round ->
       val slot = slot()
       val making = AtomicInteger(0)
       val mostMaking = AtomicInteger(0)
-      val mostAlive = AtomicInteger(0)
+      val created = Collections.synchronizedList(mutableListOf<FakeEngine>())
+      val mostNotClosed = AtomicInteger(0)
+      val failures = Collections.synchronizedList(mutableListOf<Throwable>())
       val go = CountDownLatch(1)
       val threads =
         (0 until 6).map { i ->
           thread {
-            go.await()
-            val owner = Owner(unique("race$round-$i"))
-            slot.makeForChat(
-              owner = owner,
-              name = owner.name,
-              path = path(owner.name),
-              create = {
-                mostMaking.accumulateAndGet(making.incrementAndGet()) { x, y -> maxOf(x, y) }
-                // Every other engine is closed before one is made.
-                mostAlive.accumulateAndGet(slot.liveCount + 1) { x, y -> maxOf(x, y) }
-                Thread.sleep(1)
-                making.decrementAndGet()
-                FakeEngine(owner)
-              },
-            )
+            try {
+              go.await()
+              val owner = Owner(unique("race$round-$i"))
+              slot.makeForChat(
+                owner = owner,
+                name = owner.name,
+                path = path(owner.name),
+                create = {
+                  mostMaking.accumulateAndGet(making.incrementAndGet()) { x, y -> maxOf(x, y) }
+                  // The engines created and not closed, this one included.
+                  val notClosed = synchronized(created) { created.count { !it.closed } } + 1
+                  mostNotClosed.accumulateAndGet(notClosed) { x, y -> maxOf(x, y) }
+                  Thread.sleep(1)
+                  making.decrementAndGet()
+                  FakeEngine(owner).also { created.add(it) }
+                },
+              )
+            } catch (t: Throwable) {
+              failures.add(t)
+            }
           }
         }
       go.countDown()
       threads.forEach { it.join() }
+      assertEquals("failures in the screens' threads", emptyList<Throwable>(), failures.toList())
       assertEquals("two engines made at once", 1, mostMaking.get())
-      assertEquals("two engines alive", 1, mostAlive.get())
+      assertEquals("two engines not closed at once", 1, mostNotClosed.get())
       assertEquals(1, slot.liveCount)
+      assertEquals("engines made and never closed", 1, created.count { !it.closed })
       slot.enginesOf { true }.forEach { slot.close(it) }
     }
+  }
+
+  // Model Shelf round 10d (review finding 7): a turn's "answering" mark goes up under the slot's
+  // lock. A turn started first makes a link's gate refuse; a gate that holds the slot first keeps
+  // the turn from starting until it is released; a closed engine gets no turn.
+  @Test
+  fun aTurnAndALinksHoldExcludeEachOther() {
+    val slot = slot()
+    val owner = Owner(unique("turn"))
+    val engine = slot.open(owner, path(owner.name))
+    val gate = { answering: Boolean, _: Int -> if (answering) "answers" else null }
+
+    assertEquals(1, slot.startTurn(engine) { engine.answering = true; 1 })
+    assertEquals("answers", slot.hold(gate))
+    engine.answering = false
+
+    assertNull(slot.hold(gate))
+    assertNull(slot.startTurn(engine) { engine.answering = true; 1 })
+    assertFalse(engine.answering)
+    slot.release()
+    assertEquals(1, slot.startTurn(engine) { 1 })
+
+    slot.close(engine)
+    assertNull(slot.startTurn(engine) { 1 })
+  }
+
+  // Model Shelf round 10d (review finding 10): the screen of an engine still being made goes away;
+  // the engine is closed as soon as it is made and its file is given back.
+  @Test
+  fun anEngineMadeAfterItsScreenIsGoneIsClosedAtOnce() {
+    val slot = slot()
+    val owner = Owner(unique("gone"))
+    val creating = CountDownLatch(1)
+    val finish = CountDownLatch(1)
+    var result: ChatEngineSlot.Result<Owner, FakeEngine>? = null
+    val maker = thread {
+      result =
+        slot.makeForChat(
+          owner = owner,
+          name = owner.name,
+          path = path(owner.name),
+          create = {
+            creating.countDown()
+            finish.await()
+            FakeEngine(owner)
+          },
+        )
+    }
+    assertTrue(creating.await(5, java.util.concurrent.TimeUnit.SECONDS))
+    assertEquals(emptyList<FakeEngine>(), slot.screensGone { it === owner })
+    finish.countDown()
+    maker.join(5_000)
+    assertTrue("made: $result", result is ChatEngineSlot.Result.Gone<*>)
+    assertEquals(0, slot.liveCount)
+    assertFalse(EngineOwnership.chatHolds(path(owner.name)))
   }
 }
