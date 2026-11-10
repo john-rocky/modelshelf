@@ -138,7 +138,7 @@ class ConnectActivity : ComponentActivity() {
   private fun allow(caller: String, label: String) {
     busy = true
     error = null
-    val token = LocalApi.tokens(this).issue(caller, label)
+    val issued = LocalApi.tokens(this).issue(caller, label)
     val number = LocalApi.start(this)
     lifecycleScope.launch {
       // The answer must describe this start, not a server that a queued stop is about to close.
@@ -152,7 +152,8 @@ class ConnectActivity : ComponentActivity() {
           RESULT_OK,
           Intent()
             .putExtra(LocalApi.EXTRA_BASE_URL, LocalApi.BASE_URL)
-            .putExtra(LocalApi.EXTRA_TOKEN, token),
+            .putExtra(LocalApi.EXTRA_TOKEN, issued.token)
+            .putExtra(LocalApi.EXTRA_VERIFY_KEY, issued.verifyKey?.let(ApiVerify::encode)),
         )
         finish()
       } else {

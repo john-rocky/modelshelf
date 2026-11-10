@@ -163,4 +163,144 @@ class WavReaderTest {
       assertTrue(e.message!!.contains("format 6"))
     }
   }
+
+  /** A RIFF/WAVE file of the given chunks, in order. */
+  private fun riff(vararg chunks: Pair<String, ByteArray>): ByteArray {
+    val out = ByteArrayOutputStream()
+    val body = ByteArrayOutputStream()
+    for ((id, data) in chunks) {
+      body.write(id.toByteArray())
+      body.write(le32(data.size.toLong()))
+      body.write(data)
+      if (data.size % 2 == 1) body.write(0) // the pad byte
+    }
+    out.write("RIFF".toByteArray())
+    out.write(le32(4L + body.size()))
+    out.write("WAVE".toByteArray())
+    out.write(body.toByteArray())
+    return out.toByteArray()
+  }
+
+  private fun le32(v: Long) = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(v.toInt()).array()
+
+  private fun le16(v: Int) = ByteBuffer.allocate(2).order(ByteOrder.LITTLE_ENDIAN).putShort(v.toShort()).array()
+
+  private fun pcm16(values: List<Double>): ByteArray {
+    val b = ByteBuffer.allocate(values.size * 2).order(ByteOrder.LITTLE_ENDIAN)
+    for (v in values) b.putShort((v * 32768).toInt().coerceIn(-32768, 32767).toShort())
+    return b.array()
+  }
+
+  private fun fmt(format: Int, channels: Int, rate: Int, bits: Int, blockAlign: Int, extensibleSubFormat: Int? = null): ByteArray {
+    val out = ByteArrayOutputStream()
+    out.write(le16(format))
+    out.write(le16(channels))
+    out.write(le32(rate.toLong()))
+    out.write(le32(rate.toLong() * blockAlign))
+    out.write(le16(blockAlign))
+    out.write(le16(bits))
+    if (extensibleSubFormat != null) {
+      out.write(le16(22)) // cbSize
+      out.write(le16(bits)) // valid bits
+      out.write(le32(4)) // channel mask
+      out.write(le16(extensibleSubFormat))
+      out.write(byteArrayOf(0, 0, 0, 0, 0x10, 0, 0x80.toByte(), 0, 0, 0xAA.toByte(), 0, 0x38, 0x9B.toByte(), 0x71))
+    }
+    return out.toByteArray()
+  }
+
+  @Test
+  fun anExtensibleFileReadsItsSubFormat() {
+    val values = listOf(0.25, -0.5, 0.125)
+    val a = WavReader.read(riff("fmt " to fmt(0xFFFE, 1, 16_000, 16, 2, extensibleSubFormat = 1), "data" to pcm16(values)))
+    assertEquals(3, a.samples.size)
+    for (i in values.indices) assertEquals(values[i].toFloat(), a.samples[i], 1e-4f)
+  }
+
+  @Test
+  fun anOddSizedChunkBeforeTheDataIsSkippedWithItsPadByte() {
+    val a =
+      WavReader.read(
+        riff("fmt " to fmt(1, 1, 16_000, 16, 2), "junk" to byteArrayOf(1, 2, 3), "data" to pcm16(listOf(0.5, 0.5)))
+      )
+    assertEquals(2, a.samples.size)
+    assertEquals(0.5f, a.samples[0], 1e-4f)
+  }
+
+  @Test
+  fun eightKilohertzIsUpsampledTo16Kilohertz() {
+    val tone = List(8_000) { 0.5 * sin(2 * PI * 440 * it / 8_000.0) }
+    val a = WavReader.read(wav(8_000, 1, 16, 1, tone))
+    assertEquals(16_000, a.samples.size)
+    val peak = a.samples.copyOfRange(4_000, 12_000).maxOf { abs(it) }
+    assertEquals(0.5f, peak, 0.03f)
+  }
+
+  @Test
+  fun moreThanTwoChannelsAreMixedToTheirMean() {
+    val frames = List(100) { listOf(0.4, 0.2, 0.0, -0.2) }.flatten()
+    val a = WavReader.read(wav(16_000, 4, 16, 1, frames))
+    assertEquals(100, a.samples.size)
+    for (v in a.samples) assertEquals(0.1f, v, 1e-3f)
+  }
+
+  @Test
+  fun aBlockAlignWiderThanTheSamplesSkipsThePadding() {
+    // 24-bit samples in 4-byte slots.
+    val data = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN)
+    for (v in listOf(0.5, -0.25)) {
+      val x = (v * 8388608).toInt()
+      data.put(x.toByte())
+      data.put((x shr 8).toByte())
+      data.put((x shr 16).toByte())
+      data.put(0x7F)
+    }
+    val a = WavReader.read(riff("fmt " to fmt(1, 1, 16_000, 24, 4), "data" to data.array()))
+    assertEquals(2, a.samples.size)
+    assertEquals(0.5f, a.samples[0], 1e-4f)
+    assertEquals(-0.25f, a.samples[1], 1e-4f)
+  }
+
+  @Test
+  fun aFileInsideALargerArrayReadsLikeTheFileAlone() {
+    val file = wav(48_000, 2, 16, 1, List(48_000) { 0.3 * sin(it / 10.0) })
+    val array = ByteArray(100) { 0x55 } + file + ByteArray(77) { 0x66 }
+    val alone = WavReader.read(file)
+    val inside = WavReader.read(array, offset = 100, length = file.size)
+    assertEquals(alone.samples.size, inside.samples.size)
+    for (i in alone.samples.indices) assertEquals(alone.samples[i], inside.samples[i], 0f)
+  }
+
+  @Test
+  fun resamplingKeepsASineWithinOnePercent() {
+    // 48 kHz to 16 kHz, a 1 kHz tone: away from the edges each output sample is the tone at its time.
+    val input = FloatArray(48_000) { (0.5 * sin(2 * PI * 1_000 * it / 48_000.0)).toFloat() }
+    val out = Resampler.resample(input, 48_000, 16_000)
+    assertEquals(16_000, out.size)
+    var worst = 0.0
+    for (i in 1_000 until 15_000) {
+      val want = 0.5 * sin(2 * PI * 1_000 * i / 16_000.0)
+      worst = maxOf(worst, abs(out[i] - want))
+    }
+    assertTrue("worst error $worst", worst < 0.005)
+  }
+
+  @Test
+  fun theStopCheckRunsBetweenBlocksAndEndsTheRead() {
+    var checks = 0
+    val file = wav(44_100, 1, 16, 1, List(44_100 * 2) { 0.1 })
+    try {
+      WavReader.read(file) {
+        checks++
+        if (checks == 2) throw IllegalStateException("stopped")
+      }
+      fail("expected the check to stop the read")
+    } catch (e: IllegalStateException) {
+      assertEquals("stopped", e.message)
+    }
+    assertEquals(2, checks)
+    var checks16 = 0
+    WavReader.read(wav(16_000, 1, 16, 1, List(Resampler.BLOCK * 3) { 0.1 })) { checks16++ }
+    assertEquals(3, checks16)
+  }
 }

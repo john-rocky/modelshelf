@@ -68,7 +68,7 @@ class ApiAsrProtocolTest {
       assertNull(parts[0].filename)
       assertEquals("a b.wav", parts[1].filename)
       assertEquals("audio/wav", parts[1].contentType)
-      assertArrayEquals(audio, parts[1].bytes)
+      assertArrayEquals(audio, parts[1].copyBytes())
     }
   }
 
@@ -210,5 +210,59 @@ class ApiAsrProtocolTest {
     assertEquals("litert-community/Phonon-2.5-English", m.get("id").asString)
     assertEquals("litert-community", m.get("owned_by").asString)
     assertEquals("transcription", m.getAsJsonObject("modelshelf").get("kind").asString)
+  }
+
+
+  @Test
+  fun aFormOfMoreThan64FieldsIsRefusedAnd64AreRead() {
+    val fields: List<Pair<String, Any>> = List(64) { "f$it" to "v$it" }
+    assertEquals(64, MultipartForm.parse("multipart/form-data; boundary=B", body("B", "\r\n", *fields.toTypedArray())).size)
+    val more = fields + ("f64" to "v")
+    try {
+      MultipartForm.parse("multipart/form-data; boundary=B", body("B", "\r\n", *more.toTypedArray()))
+      fail("expected a 400")
+    } catch (e: ApiError) {
+      assertEquals(400, e.status)
+      assertEquals("The form has more than 64 fields.", e.message)
+    }
+  }
+
+  @Test
+  fun aPartsHeadersAreLookedForOnlyInTheirFirst16Kilobytes() {
+    val b =
+      ("--B\r\nContent-Disposition: form-data; name=\"x\"; filename=\"" + "a".repeat(20_000) + "\"\r\n\r\n" +
+          "abc\r\n--B--\r\n")
+        .toByteArray()
+    try {
+      MultipartForm.parse("multipart/form-data; boundary=B", b)
+      fail("expected a 400")
+    } catch (e: ApiError) {
+      assertEquals(400, e.status)
+    }
+  }
+
+  @Test
+  fun aPreambleIsSkippedAndBytesPastTheSizeAreNotRead() {
+    val form = body("XyZ123", "\r\n", "model" to "m", "file" to audio)
+    val withPreamble = "This is a preamble.\r\n".toByteArray() + form
+    val array = withPreamble + ByteArray(1_000) { 0x2D } // "-----..." after the body
+    val parts = MultipartForm.parse("multipart/form-data; boundary=XyZ123", array, withPreamble.size)
+    assertEquals(2, parts.size)
+    assertArrayEquals(audio, parts[1].copyBytes())
+    // The file part points into the body: nothing is copied.
+    assertTrue(parts[1].data === array)
+  }
+
+  @Test
+  fun aRequestWithoutItsAudioKeepsItsFields() {
+    val form = body("XyZ123", "\r\n", "model" to "m", "language" to "en", "file" to audio)
+    val r = parseTranscriptionForm(MultipartForm.parse("multipart/form-data; boundary=XyZ123", form))
+    val kept = r.withoutAudio()
+    assertEquals("m", kept.model)
+    assertEquals("en", kept.language)
+    assertEquals(r.format, kept.format)
+    assertEquals("a b.wav", kept.audio.filename)
+    assertEquals(0, kept.audio.size)
+    assertEquals(0, kept.audio.data.size)
   }
 }

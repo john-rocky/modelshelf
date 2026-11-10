@@ -16,16 +16,37 @@
 
 package com.google.ai.edge.gallery.server
 
-/** One field of a multipart/form-data body. */
+/**
+ * One field of a multipart/form-data body: [size] bytes of [data] from [offset]. The bytes stay in
+ * the body's array (a 25 MB audio file is not copied).
+ */
 class FormPart(
   val name: String,
   /** The file name the client sent, for a file field; null for a text field. */
   val filename: String?,
   val contentType: String?,
-  val bytes: ByteArray,
+  val data: ByteArray,
+  val offset: Int,
+  val size: Int,
 ) {
-  fun text(): String = bytes.toString(Charsets.UTF_8)
+  constructor(
+    name: String,
+    filename: String?,
+    contentType: String?,
+    bytes: ByteArray,
+  ) : this(name, filename, contentType, bytes, 0, bytes.size)
+
+  fun text(): String = String(data, offset, size, Charsets.UTF_8)
+
+  /** A copy of the bytes (tests). */
+  fun copyBytes(): ByteArray = data.copyOfRange(offset, offset + size)
 }
+
+/** The most fields one form may have (OpenAI's audio forms have about ten). */
+const val MAX_FORM_PARTS = 64
+
+/** The most bytes of header lines one part may have. */
+const val MAX_PART_HEADER_BYTES = 16 * 1024
 
 /**
  * A reader of multipart/form-data bodies (RFC 7578), as OpenAI's audio endpoints take them:
@@ -47,35 +68,45 @@ object MultipartForm {
     throw ApiError(400, "The multipart/form-data Content-Type has no boundary.")
   }
 
-  /** The fields of [body], in order. Throws [ApiError] 400 when the body is not well formed. */
-  fun parse(contentType: String?, body: ByteArray): List<FormPart> {
+  /**
+   * The fields of the first [size] bytes of [body], in order. Throws [ApiError] 400 when the body is
+   * not well formed or has more than [MAX_FORM_PARTS] fields. Each byte is looked at a bounded
+   * number of times: a part's header lines are looked for only in its first
+   * [MAX_PART_HEADER_BYTES] bytes before the next boundary.
+   */
+  fun parse(contentType: String?, body: ByteArray, size: Int = body.size): List<FormPart> {
     val boundary = boundaryOf(contentType)
     val delimiter = "--$boundary".toByteArray(Charsets.US_ASCII)
-    var pos = indexOf(body, delimiter, 0)
+    var pos = indexOf(body, delimiter, 0, size)
     if (pos < 0) throw malformed("no part starts with the boundary")
     val parts = mutableListOf<FormPart>()
     while (true) {
       pos += delimiter.size
       // "--" after a delimiter closes the body.
-      if (pos + 2 <= body.size && body[pos] == '-'.code.toByte() && body[pos + 1] == '-'.code.toByte()) break
-      pos = skipLineEnd(body, pos) ?: throw malformed("a boundary line does not end")
-      val headerEnd = findHeaderEnd(body, pos) ?: throw malformed("a part's headers do not end")
+      if (pos + 2 <= size && body[pos] == '-'.code.toByte() && body[pos + 1] == '-'.code.toByte()) break
+      if (parts.size >= MAX_FORM_PARTS) {
+        throw ApiError(400, "The form has more than $MAX_FORM_PARTS fields.")
+      }
+      pos = skipLineEnd(body, pos, size) ?: throw malformed("a boundary line does not end")
+      val next = indexOf(body, delimiter, pos, size)
+      if (next < 0) throw malformed("a part does not end with the boundary")
+      val headerEnd =
+        findHeaderEnd(body, pos, minOf(next, pos + MAX_PART_HEADER_BYTES))
+          ?: throw malformed("a part's headers do not end")
       val headers = String(body, pos, headerEnd.first - pos, Charsets.UTF_8)
       val contentStart = headerEnd.second
-      val next = indexOf(body, delimiter, contentStart)
-      if (next < 0) throw malformed("a part does not end with the boundary")
       var contentEnd = next
       // The line end before the delimiter belongs to the delimiter.
-      if (contentEnd >= 2 && body[contentEnd - 2] == CR && body[contentEnd - 1] == LF) contentEnd -= 2
-      else if (contentEnd >= 1 && body[contentEnd - 1] == LF) contentEnd -= 1
+      if (contentEnd - 2 >= contentStart && body[contentEnd - 2] == CR && body[contentEnd - 1] == LF) contentEnd -= 2
+      else if (contentEnd - 1 >= contentStart && body[contentEnd - 1] == LF) contentEnd -= 1
       if (contentEnd < contentStart) contentEnd = contentStart
-      parts.add(toPart(headers, body.copyOfRange(contentStart, contentEnd)))
+      parts.add(toPart(headers, body, contentStart, contentEnd - contentStart))
       pos = next
     }
     return parts
   }
 
-  private fun toPart(headers: String, content: ByteArray): FormPart {
+  private fun toPart(headers: String, body: ByteArray, offset: Int, length: Int): FormPart {
     var name: String? = null
     var filename: String? = null
     var contentType: String? = null
@@ -94,7 +125,7 @@ object MultipartForm {
         "content-type" -> contentType = value
       }
     }
-    return FormPart(name ?: throw malformed("a part has no name"), filename, contentType, content)
+    return FormPart(name ?: throw malformed("a part has no name"), filename, contentType, body, offset, length)
   }
 
   /** form-data; name="file"; filename="a b.wav" -> {name: file, filename: a b.wav}. */
@@ -141,29 +172,29 @@ object MultipartForm {
     }
   }
 
-  private fun skipLineEnd(b: ByteArray, at: Int): Int? =
+  private fun skipLineEnd(b: ByteArray, at: Int, end: Int): Int? =
     when {
-      at + 1 < b.size && b[at] == CR && b[at + 1] == LF -> at + 2
-      at < b.size && b[at] == LF -> at + 1
+      at + 1 < end && b[at] == CR && b[at + 1] == LF -> at + 2
+      at < end && b[at] == LF -> at + 1
       else -> null
     }
 
-  /** (end of the headers, start of the content). */
-  private fun findHeaderEnd(b: ByteArray, from: Int): Pair<Int, Int>? {
-    val crlf = indexOf(b, byteArrayOf(CR, LF, CR, LF), from)
-    val lf = indexOf(b, byteArrayOf(LF, LF), from)
+  /** (end of the headers, start of the content), looked for in [from, until). */
+  private fun findHeaderEnd(b: ByteArray, from: Int, until: Int): Pair<Int, Int>? {
+    val crlf = indexOf(b, byteArrayOf(CR, LF, CR, LF), from, until)
+    val lf = indexOf(b, byteArrayOf(LF, LF), from, until)
     return when {
       crlf >= 0 && (lf < 0 || crlf <= lf) -> crlf to crlf + 4
       lf >= 0 -> lf to lf + 2
-      // A part with no header lines starts right after the boundary line.
       else -> null
     }
   }
 
-  fun indexOf(haystack: ByteArray, needle: ByteArray, from: Int): Int {
+  /** The first [needle] in [haystack] that lies wholly in [from, until), or -1. */
+  fun indexOf(haystack: ByteArray, needle: ByteArray, from: Int, until: Int = haystack.size): Int {
     if (needle.isEmpty()) return from
     val first = needle[0]
-    val last = haystack.size - needle.size
+    val last = minOf(until, haystack.size) - needle.size
     var i = maxOf(0, from)
     outer@ while (i <= last) {
       if (haystack[i] != first) {

@@ -26,6 +26,7 @@ import android.os.ParcelFileDescriptor
 import android.util.Log
 import androidx.annotation.VisibleForTesting
 import androidx.core.content.ContextCompat
+import com.google.ai.edge.gallery.BuildConfig
 import com.google.ai.edge.gallery.speech.VoiceInputFixture
 import com.google.ai.edge.gallery.speech.VoiceLevelMeter
 import java.io.IOException
@@ -91,7 +92,13 @@ internal class PcmAudioRecorder(
         null
       }
     if (externalPfd != null) {
-      val meter = VoiceLevelMeter(if (fixtureSource != null) "debug file" else "external source")
+      // Model Shelf: the level log is for test runs: debug builds only.
+      val meter =
+        if (BuildConfig.DEBUG) {
+          VoiceLevelMeter(if (fixtureSource != null) "debug file" else "external source")
+        } else {
+          null
+        }
       try {
         streamFromExternalPfd(
           externalPfd = externalPfd,
@@ -101,7 +108,7 @@ internal class PcmAudioRecorder(
           meter = meter,
         )
       } finally {
-        meter.finish()
+        meter?.finish()
       }
       return
     }
@@ -133,8 +140,9 @@ internal class PcmAudioRecorder(
       return
     }
 
-    // Model Shelf: the microphone's level in dBFS, one log line per second (numbers only).
-    val meter = VoiceLevelMeter("microphone", sampleRateHz)
+    // Model Shelf: the microphone's level in dBFS, one log line per second (numbers only), in debug
+    // builds only: a release build keeps no record of when or how loudly its user spoke.
+    val meter = if (BuildConfig.DEBUG) VoiceLevelMeter("microphone", sampleRateHz) else null
     var record: AudioRecord? = null
     try {
       if (isStopped()) return
@@ -172,7 +180,7 @@ internal class PcmAudioRecorder(
           } else {
             floatBuffer.copyOf(readCount)
           }
-        meter.add(samples)
+        meter?.add(samples)
         onAmplitude(samples.calculateNormalizedVolume())
         val unused = audioChannel.trySend(samples)
       }
@@ -184,7 +192,7 @@ internal class PcmAudioRecorder(
       Log.e(TAG, "AudioRecord capture failed", e)
       throw AsrServiceError.AudioRecordingFailed(e)
     } finally {
-      meter.finish()
+      meter?.finish()
       if (record != null && audioRecordRef.compareAndSet(record, null)) {
         stopAndRelease(record)
       }

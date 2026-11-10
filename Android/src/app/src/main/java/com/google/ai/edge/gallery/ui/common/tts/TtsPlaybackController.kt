@@ -33,6 +33,7 @@ import com.google.ai.edge.gallery.data.supplementary.EngineErrorReason
 import com.google.ai.edge.gallery.data.supplementary.SpeechModality
 import com.google.ai.edge.gallery.data.supplementary.SpeechSelectionNotice
 import com.google.ai.edge.gallery.data.supplementary.SpeechSelectionUseCase
+import com.google.ai.edge.gallery.server.EngineOwnership
 import com.google.ai.edge.gallery.services.tts.DEFAULT_TTS_LANGUAGE_CODE
 import com.google.ai.edge.gallery.services.tts.PreStartRetries
 import com.google.ai.edge.gallery.services.tts.TextChunk
@@ -594,6 +595,19 @@ internal constructor(
       }
     }
     ttsServiceProvider?.registerOnStopAllListener(onExternalStopAllListener)
+    // Model Shelf: the local API asks before it speaks (its speech waits while the user listens).
+    EngineOwnership.readAloudActive = { isReadAloudActive() }
+  }
+
+  /**
+   * Model Shelf: whether the read-aloud plays, is paused, or prepares its next sentence. Read from
+   * the local API's threads: a racy read only moves the moment the API waits or speaks.
+   */
+  fun isReadAloudActive(): Boolean {
+    val state = _playbackState.value
+    return state == TtsPlaybackState.PLAYING ||
+      state == TtsPlaybackState.PAUSED ||
+      prefetchedSentence != null
   }
 
   /**

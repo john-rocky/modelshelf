@@ -31,6 +31,8 @@ import java.io.File
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.coroutines.AbstractCoroutineContextElement
+import kotlin.coroutines.CoroutineContext
 import kotlin.time.measureTime
 import kotlin.time.measureTimedValue
 import kotlinx.coroutines.CancellationException
@@ -192,6 +194,23 @@ internal constructor(
   private val stateLock = Any()
   private val inFlightJobs = mutableSetOf<Job>()
   private val activeSynthesisJobs = mutableSetOf<Job>()
+  /** Model Shelf: the local API's jobs among [activeSynthesisJobs] ([LocalApiTtsCall]). */
+  private val apiSynthesisJobs = mutableSetOf<Job>()
+  /**
+   * Model Shelf: whose synthesis runs in the native task now: true = the local API's, false = the
+   * app's, null = none. Guarded by [stateLock].
+   */
+  private var nativeRunByApi: Boolean? = null
+  /**
+   * Model Shelf: how many times the loaded model's native synthesis was cancelled. A cancelled
+   * native call may end early without an error, so the local API compares this before and after a
+   * sentence and answers 503 rather than return audio that may be cut.
+   */
+  private val nativeCancels = AtomicLong(0)
+
+  /** Model Shelf: see [nativeCancels]. */
+  val nativeCancelCount: Long
+    get() = nativeCancels.get()
   /**
    * Launches [destroy]'s [release] undispatched so it synchronously cancels in-flight work and
    * claims (or queues on) [prepareMutex] before [destroy] returns, while keeping its own
@@ -435,6 +454,7 @@ internal constructor(
     val pcm =
       flow {
           val collectorJob = currentCoroutineContext()[Job]
+          val forApi = currentCoroutineContext()[LocalApiTtsCall] != null
           synchronized(stateLock) {
             if (prepared !== loaded) {
               throw TtsServiceError.EngineUnavailable(
@@ -444,8 +464,12 @@ internal constructor(
             collectorJob?.let {
               inFlightJobs.add(it)
               activeSynthesisJobs.add(it)
+              if (forApi) apiSynthesisJobs.add(it)
             }
           }
+          // Model Shelf: the read-aloud the user hears comes first: its synthesis stops the local
+          // API's (that request answers 503 and may try again).
+          if (!forApi) stopLocalApiSynthesis()
           try {
             prepareMutex.withLock {
               if (prepared !== loaded) {
@@ -453,6 +477,9 @@ internal constructor(
                   "MediaPipeTtsEngine was released before synthesis started."
                 )
               }
+              synchronized(stateLock) { nativeRunByApi = forApi }
+              val cancelsAtStart = nativeCancels.get()
+              try {
               wordTimestamps.clear()
               var cumulativeEmittedFrames = 0L
               // Yield after claiming prepareMutex in FIFO order so an UNDISPATCHED collector on
@@ -558,12 +585,21 @@ internal constructor(
                   }
                 }
               }
+              // Model Shelf: a native cancel during the local API's run may end a clause early
+              // without an error: end the API's sentence rather than pass on audio that may be cut.
+              if (forApi && nativeCancels.get() != cancelsAtStart) {
+                throw CancellationException("The voice engine's synthesis was cancelled during the sentence.")
+              }
+              } finally {
+                synchronized(stateLock) { nativeRunByApi = null }
+              }
             }
           } finally {
             collectorJob?.let {
               synchronized(stateLock) {
                 inFlightJobs.remove(it)
                 activeSynthesisJobs.remove(it)
+                apiSynthesisJobs.remove(it)
               }
             }
           }
@@ -667,12 +703,35 @@ internal constructor(
   override fun stop() {
     val synthesisJobsSnapshot: List<Job>
     synchronized(stateLock) {
-      if (!isWarmingUp) {
+      // Model Shelf: the app stops only its own work. The local API's synthesis runs on, and the
+      // native task is cancelled only while it speaks for the app.
+      if (!isWarmingUp && nativeRunByApi == false) {
+        nativeCancels.incrementAndGet()
         prepared?.synthesizer?.cancel()
       }
-      synthesisJobsSnapshot = activeSynthesisJobs.toList()
+      synthesisJobsSnapshot = activeSynthesisJobs.filter { it !in apiSynthesisJobs }
     }
     for (job in synthesisJobsSnapshot) {
+      job.cancel()
+    }
+  }
+
+  /**
+   * Model Shelf: stops the local API's synthesis: when the app's own synthesis starts (the user's
+   * read-aloud comes first), and when the API's request ends early (time limit, too much audio, a
+   * caller that left, the API's stop). The native task is cancelled only while it speaks for the API.
+   */
+  fun stopLocalApiSynthesis() {
+    val apiJobs: List<Job>
+    synchronized(stateLock) {
+      if (apiSynthesisJobs.isEmpty()) return
+      if (nativeRunByApi == true) {
+        nativeCancels.incrementAndGet()
+        prepared?.synthesizer?.cancel()
+      }
+      apiJobs = apiSynthesisJobs.toList()
+    }
+    for (job in apiJobs) {
       job.cancel()
     }
   }
@@ -686,6 +745,7 @@ internal constructor(
     val jobsSnapshot: List<Job>
     synchronized(stateLock) {
       initializingSynthesizer?.cancel()
+      nativeCancels.incrementAndGet()
       prepared?.synthesizer?.cancel()
       jobsSnapshot = inFlightJobs.toList()
     }
@@ -930,4 +990,13 @@ internal constructor(
     internal fun floatSamplesToPcm16(samples: FloatArray): ByteArray =
       floatSamplesToPcm16Impl(samples)
   }
+}
+
+/**
+ * Model Shelf: marks a coroutine that calls the shared [MediaPipeTtsEngine] for the local API. The
+ * app's stop and cancel ([MediaPipeTtsEngine.stop]) leave such calls running; the app's next
+ * synthesis stops them.
+ */
+class LocalApiTtsCall : AbstractCoroutineContextElement(Key) {
+  companion object Key : CoroutineContext.Key<LocalApiTtsCall>
 }

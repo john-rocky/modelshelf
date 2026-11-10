@@ -91,9 +91,16 @@ data class ApiRequest(
   val includeUsage: Boolean = false,
 )
 
-/** A request the API refuses: the HTTP status and one sentence for the caller. */
-class ApiError(val status: Int, override val message: String, val code: String? = null) :
-  Exception(message)
+/**
+ * A request the API refuses: the HTTP status and one sentence for the caller. [retryAfterS] goes out
+ * as Retry-After (every 503 that asks the caller to try again carries one).
+ */
+open class ApiError(
+  val status: Int,
+  override val message: String,
+  val code: String? = null,
+  val retryAfterS: Int? = null,
+) : Exception(message)
 
 /** A model file on this phone that the API can serve. Built by [ApiModelCatalog]. */
 data class ApiModelEntry(
@@ -270,6 +277,21 @@ fun engineServes(loadedTokens: Int, wantedTokens: Int): Boolean = loadedTokens >
 /** A client's text made safe for a response header: letters, digits and ._- only, at most 64 each. */
 fun headerSafe(values: List<String>): String =
   values.joinToString(",") { v -> v.filter { it in 'a'..'z' || it in 'A'..'Z' || it in '0'..'9' || it in "._-" }.take(64) }
+
+/**
+ * A name a caller sent (a model or a voice), for logcat: only letters, digits and "._-/:" (a model
+ * name such as litert-community/Kokoro-82M stays whole), at most 64, with the sent length when
+ * anything was left out, so a caller's text never reaches the log as it was sent (a caller may put
+ * the user's text in the wrong field; spaces are always left out).
+ */
+fun logName(value: String): String {
+  val kept = value.filter { it in 'a'..'z' || it in 'A'..'Z' || it in '0'..'9' || it in "._-/:" }.take(64)
+  return if (kept == value) kept else "$kept…(${value.length} characters)"
+}
+
+/** An error message for logcat: each quoted part (a name a caller sent) as [logName] keeps it, at most 300 characters. */
+fun logText(message: String): String =
+  Regex("\"([^\"]*)\"").replace(message) { "\"" + logName(it.groupValues[1]) + "\"" }.take(300)
 
 /**
  * Finds a model by the name a request gives: the exact API name, the same ignoring case, without
@@ -475,7 +497,7 @@ fun parseOpenAiChat(body: String): ApiRequest {
   o.opt("response_format")?.let { rf ->
     val type = if (rf.isJsonObject) rf.asJsonObject.optString("type") else null
     if (type != null && type != "text") {
-      throw ApiError(400, "\"response_format\" $type is not supported by this API yet.")
+      throw ApiError(400, "\"response_format\" \"$type\" is not supported by this API yet.")
     }
   }
   if (o.nonEmpty("stop")) throw ApiError(400, "\"stop\" sequences are not supported by this API yet.")

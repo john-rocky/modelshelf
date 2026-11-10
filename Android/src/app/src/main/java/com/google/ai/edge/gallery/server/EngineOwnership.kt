@@ -73,11 +73,48 @@ object EngineOwnership {
   // ---- Text to speech ----------------------------------------------------------------------------
   // The app's read-aloud and the local API share one MediaPipe TTS engine (the app's singleton
   // MediaPipeTtsEngine): it holds one voice model at a time and runs one synthesis at a time, so a
-  // voice model file is never loaded twice and nothing has to be reserved. What is decided here is
-  // when the local API may unload that shared model: only when nobody used the engine after the
-  // API's own last call (the engine counts every prepare and synthesis of every user). When the app
-  // stops or releases the engine during an API request, the request ends with a 503 and the app
-  // keeps the engine.
+  // voice model file is never loaded twice and nothing has to be reserved.
+  // - The read-aloud the user hears comes first: while it plays, is paused or prepares its next
+  //   sentence ([readAloudActive]), the API's speech requests get a 503 with Retry-After, and the
+  //   app's own synthesis stops an API sentence that runs (MediaPipeTtsEngine.stopLocalApiSynthesis).
+  // - The app's stop (leaving a screen, going to the background, voice input, a settings change)
+  //   stops only the app's own work; an API synthesis runs on (MediaPipeTtsEngine.stop).
+  // - The API unloads the shared model only when it loaded the model itself and nobody used the
+  //   engine after the API's own last call (the engine counts every prepare and synthesis of every
+  //   user). When the app releases the engine during an API request, the request ends with a 503.
+
+  /**
+   * Whether the user's read-aloud plays, is paused or prepares its next sentence. Set by
+   * TtsPlaybackController when it is made; false while no read-aloud exists.
+   */
+  @Volatile var readAloudActive: () -> Boolean = { false }
+
+  /** Throws a 503 with Retry-After while the user's read-aloud plays, is paused or prepares a sentence. */
+  fun checkReadAloudIdle() {
+    if (readAloudActive()) {
+      throw ApiError(
+        503,
+        "Model Shelf is reading aloud to its user; try again in $READ_ALOUD_RETRY_S s.",
+        "busy",
+        retryAfterS = READ_ALOUD_RETRY_S,
+      )
+    }
+  }
+
+  // Speech recognition with a MediaPipe model (Parakeet TDT): one engine per model file across the
+  // voice input and the local API, and the voice input comes first. Before the voice input loads a
+  // file, the API lets go of it (its running request answers 503); the API loads a file only after
+  // the voice input let go of it while no dictation ran. Phonon-2.5-English is shared in
+  // PhononEngine.
+
+  /** Set by the local API's speech host: makes the API let go of the MediaPipe model at a path. */
+  @Volatile var apiAsrYield: suspend (path: String) -> Unit = {}
+
+  /**
+   * Set by the voice input: lets go of its engine for a path when no dictation runs or loads, and
+   * returns whether the path is free; false while a dictation or a load uses it.
+   */
+  @Volatile var appAsrLetGo: suspend (path: String) -> Boolean = { true }
 
   /** The engine's use count right after the local API's last call, or null when the API holds nothing. */
   private var apiTtsMark: Long? = null

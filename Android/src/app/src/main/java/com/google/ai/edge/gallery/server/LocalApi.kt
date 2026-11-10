@@ -68,6 +68,11 @@ object LocalApi {
   const val ACTION_CONNECT = "io.github.johnrocky.modelshelf.action.CONNECT"
   const val EXTRA_BASE_URL = "base_url"
   const val EXTRA_TOKEN = "token"
+  /**
+   * The calling app's secret for the check it runs before it sends anything (base64url, 32 bytes;
+   * ApiVerify).
+   */
+  const val EXTRA_VERIFY_KEY = "verify_key"
   const val EXTRA_ERROR = "error"
 
   private val _state = MutableStateFlow(LocalApiState())

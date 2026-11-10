@@ -22,6 +22,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.ComponentCallbacks2
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -93,6 +94,27 @@ class ApiServerService : Service() {
     if (stopSelfResult(startId)) {
       ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
     }
+  }
+
+  /**
+   * The system asks for memory: the API unloads its idle models (voice first). On Android 14 and
+   * later only UI_HIDDEN and BACKGROUND arrive; UI_HIDDEN alone says nothing about memory.
+   */
+  override fun onTrimMemory(level: Int) {
+    super.onTrimMemory(level)
+    @Suppress("DEPRECATION")
+    val memoryLow =
+      level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND ||
+        level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW ||
+        level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL
+    Log.i(TAG, "onTrimMemory $level" + if (memoryLow) ": unloading idle models" else "")
+    if (memoryLow) LocalApi.runningServer()?.onMemorySignal("onTrimMemory $level")
+  }
+
+  override fun onLowMemory() {
+    super.onLowMemory()
+    Log.i(TAG, "onLowMemory: unloading idle models")
+    LocalApi.runningServer()?.onMemorySignal("onLowMemory")
   }
 
   override fun onDestroy() {

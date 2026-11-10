@@ -21,6 +21,7 @@ import android.media.AudioRecord
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import androidx.annotation.VisibleForTesting
+import com.google.ai.edge.gallery.server.EngineOwnership
 import com.google.ai.edge.gallery.server.makeOrClose
 import com.google.mediapipe.tasks.audio.audiotranscriber.AudioTranscriber
 import com.google.mediapipe.tasks.audio.audiotranscriber.AudioTranscriberResult
@@ -160,6 +161,11 @@ internal constructor(
       audioRecordFactory = audioRecordFactory,
       audioChunkSource = audioChunkSource,
     )
+
+  init {
+    // Model Shelf: the local API asks before it loads a speech model this service may hold.
+    EngineOwnership.appAsrLetGo = { path -> letGoIfIdle(path) }
+  }
 
   override suspend fun checkStatus(): AsrServiceStatus =
     withContext(ioDispatcher) {
@@ -310,6 +316,9 @@ internal constructor(
       }
       return instance
     }
+    // Model Shelf: one engine per model file: the local API lets go of this file first (the voice
+    // input comes first; a transcription the API runs on it answers 503).
+    EngineOwnership.apiAsrYield(modelFile.absolutePath)
     for (delegate in resolveCandidateBackends(config, modelMetadata)) {
       currentCoroutineContext().ensureActive()
       if (engineState.get().prepareGeneration != currentGeneration) {
@@ -622,6 +631,23 @@ internal constructor(
 
   /** Completes when the most recently scheduled deferred close of the native engine has run. */
   @Volatile internal var pendingCloseJob: Job? = null
+
+  /**
+   * Model Shelf: lets go of the engine when it holds the MediaPipe model at [path] and no dictation
+   * runs or loads, so the local API can load that file without a second copy in memory; returns
+   * false while a dictation or a load uses the engine. The next dictation loads the model again.
+   */
+  internal suspend fun letGoIfIdle(path: String): Boolean {
+    val cur = engineState.get()
+    val holds = cur.audioTranscriber != null && cur.modelFingerprint?.path == path
+    if (cur.inFlightPrepare != null) return false
+    if (!holds) return true
+    if (cur.activeSession != null) return false
+    Log.i(TAG, "Letting go of the speech engine: the local API loads the same model")
+    release()
+    pendingCloseJob?.join()
+    return true
+  }
 
   companion object {
     /** 16 kHz sampling rate matching open-weight ASR models. */

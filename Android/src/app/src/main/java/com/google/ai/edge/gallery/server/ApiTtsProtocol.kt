@@ -16,6 +16,7 @@
 
 package com.google.ai.edge.gallery.server
 
+import com.google.ai.edge.gallery.services.tts.TtsTextNormalizer
 import com.google.gson.JsonArray
 import com.google.gson.JsonElement
 import com.google.gson.JsonObject
@@ -42,13 +43,76 @@ const val SPEECH_OUTPUT_RATE_HZ = 24_000
 
 /**
  * The most audio one request may make: 10 minutes, over twice the length 4,096 characters take at
- * 15 characters a second (273 s). A voice model that goes past it is stopped (a 500), so one
- * request holds at most 28.8 MB of audio.
+ * 15 characters a second (273 s). A voice model that goes past it is stopped (a 500).
+ *
+ * Memory: a WAV answer keeps its 16-bit audio until it is sent, at most 28.8 MB; a pcm answer is
+ * sent sentence by sentence and keeps about one sentence. While one sentence is spoken, the voice
+ * engine also holds that sentence's float samples twice (its chunks, joined for word timestamps):
+ * 8 bytes per sample, about 0.2 MB per second of the sentence, at most 20 s for a sentence of
+ * [MAX_SPEECH_PIECE_CHARS] characters at the usual pace.
  */
 const val MAX_SPEECH_AUDIO_S = 600
 
+/**
+ * The longest piece of text the API gives the voice engine in one call. The input is split the way
+ * the app's read-aloud splits a chat answer, one sentence per call, so each sentence keeps its own
+ * end (a question stays a question); a longer sentence is split at its last comma, else its last
+ * space, before this many characters.
+ */
+const val MAX_SPEECH_PIECE_CHARS = 300
+
+/**
+ * A speech answer stops being sent when a write waits and the caller has taken no byte for this
+ * long, counted from the end of the synthesis (a WAV file) or the start of each sentence (PCM), or
+ * from the last write the caller's reading let through ([WriteWatch]): a caller that stopped reading
+ * is cut within a minute of the synthesis end, and one that plays as it reads never waits that long.
+ */
+const val SPEECH_WRITE_STALL_MS = 55_000L
+
+/**
+ * A speech answer also stops when the audio's own length plus this much has passed since the
+ * synthesis ended: a caller that reads as it plays (real time) finishes well before.
+ */
+const val SPEECH_WRITE_GRACE_MS = 60_000L
+
+/** The Retry-After of a speech request refused while the app reads aloud to the user. */
+const val READ_ALOUD_RETRY_S = 10
+
 /** [MAX_SPEECH_AUDIO_S] in bytes of 24 kHz mono 16-bit PCM. */
 const val MAX_SPEECH_AUDIO_BYTES = MAX_SPEECH_AUDIO_S * SPEECH_OUTPUT_RATE_HZ * 2
+
+/**
+ * The pieces the voice engine speaks for [input], in order: the sentences of
+ * [TtsTextNormalizer.segmentTextIntoChunks] (what the read-aloud speaks: Markdown and emoji left
+ * out), each split again when it is longer than [MAX_SPEECH_PIECE_CHARS]. A piece with no letter or
+ * digit says nothing and is left out, so the list is empty when nothing can be spoken.
+ */
+fun speechPieces(input: String): List<String> {
+  val out = mutableListOf<String>()
+  for (chunk in TtsTextNormalizer.segmentTextIntoChunks(input)) {
+    var rest = chunk.cleanSpokenText.trim()
+    while (rest.codePointCount(0, rest.length) > MAX_SPEECH_PIECE_CHARS) {
+      val limit = rest.offsetByCodePoints(0, MAX_SPEECH_PIECE_CHARS)
+      val comma = rest.lastIndexOf(", ", limit - 1)
+      val space = rest.lastIndexOf(' ', limit - 1)
+      val cut =
+        when {
+          comma > 0 -> comma + 1
+          space > 0 -> space
+          else -> limit
+        }
+      addSpoken(out, rest.substring(0, cut))
+      rest = rest.substring(cut).trim()
+    }
+    addSpoken(out, rest)
+  }
+  return out
+}
+
+private fun addSpoken(out: MutableList<String>, piece: String) {
+  val p = piece.trim()
+  if (p.any { it.isLetterOrDigit() }) out.add(p)
+}
 
 private const val SPEECH_MODELS_HINT = "GET /v1/models lists the models on this phone"
 

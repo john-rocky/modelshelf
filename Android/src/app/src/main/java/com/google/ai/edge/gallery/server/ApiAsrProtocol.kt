@@ -29,6 +29,15 @@ const val MAX_AUDIO_BODY_BYTES = 25L * 1024 * 1024
 /** The most audio one request may hold, after it is turned into 16 kHz mono. */
 const val MAX_AUDIO_SECONDS = 600
 
+/**
+ * How long a transcription's body may take to arrive once its turn has come (the body is read
+ * inside the turn, so only the request that runs holds its audio); then 408.
+ */
+const val AUDIO_UPLOAD_LIMIT_MS = 60_000L
+
+/** A transcription's time limit is this plus the length of its audio; then 504. */
+const val TRANSCRIPTION_LIMIT_BASE_MS = 120_000L
+
 /** A speech recognition model the local API can serve. */
 data class AsrEntry(
   /** The API name: the Hugging Face repo. */
@@ -77,7 +86,18 @@ class TranscriptionRequest(
   val stream: Boolean,
   /** Fields sent that the API does not apply, for the log and X-ModelShelf-Not-Applied. */
   val ignored: List<String>,
-)
+) {
+  /** The same request without the audio's bytes, kept once the audio is decoded so the body can go. */
+  fun withoutAudio(): TranscriptionRequest =
+    TranscriptionRequest(
+      model,
+      FormPart(audio.name, audio.filename, audio.contentType, ByteArray(0)),
+      language,
+      format,
+      stream,
+      ignored,
+    )
+}
 
 private const val MODELS_HINT = "GET /v1/models lists the models on this phone"
 
@@ -91,7 +111,7 @@ fun parseTranscriptionForm(parts: List<FormPart>): TranscriptionRequest {
   }
   if (files.size > 1) throw ApiError(400, "Send one audio file per request.")
   val audio = files.single()
-  if (audio.bytes.isEmpty()) throw ApiError(400, "The audio file is empty.")
+  if (audio.size == 0) throw ApiError(400, "The audio file is empty.")
   val model = text("model") ?: throw ApiError(400, "Name a speech model in the form field \"model\"; $MODELS_HINT.")
   val format =
     when (val f = text("response_format") ?: "json") {

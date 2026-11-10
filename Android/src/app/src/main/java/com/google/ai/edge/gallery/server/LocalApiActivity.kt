@@ -169,13 +169,16 @@ private fun LocalApiScreen() {
     HorizontalDivider()
     Text("Token for curl or a computer", style = MaterialTheme.typography.titleMedium)
     Text(
-      "Send it as \"Authorization: Bearer <token>\". A new token replaces the last one.",
+      "Send it as \"Authorization: Bearer <token>\". A new token replaces the last one. A copied " +
+        "token cannot check that it talks to Model Shelf (an app on this phone could hold the " +
+        "port while the API is off): use it only from a computer you control, never in an app; " +
+        "apps connect with Connect to Model Shelf.",
       style = MaterialTheme.typography.bodySmall,
     )
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
       OutlinedButton(
         onClick = {
-          val token = tokens.issue(ApiTokenStore.MANUAL, "Copied token")
+          val token = tokens.issue(ApiTokenStore.MANUAL, "Copied token").token
           copiedToken = token
           grants = tokens.all()
           val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager

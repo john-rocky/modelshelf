@@ -127,6 +127,19 @@ class ApiEngineHost(private val context: Context, private val onStateChanged: ()
 
   class Running(val prepared: Prepared, val run: AnswerRun, val tokensBefore: Int?)
 
+  /**
+   * Runs before a chat model loads, inside its turn, with the model's name and what it needs in kB
+   * ([MemoryRule]): the server unloads the API's voice model first when memory is short.
+   */
+  @Volatile var beforeLoad: suspend (name: String, needKb: Long) -> Unit = { _, _ -> }
+
+  /** Unloads the API's chat model for the memory rule or a memory signal (inside the turn lock). */
+  suspend fun unloadForMemory(why: String): Boolean {
+    if (loaded == null) return false
+    unloadLocked(why)
+    return true
+  }
+
   /** The loaded model, its expiry and backend, for /api/ps and the notification. */
   fun loadedInfo(): Triple<ApiModelEntry, Long, String>? =
     loaded?.let { Triple(it.entry, it.expiresAtMs, it.backend) }
@@ -134,12 +147,14 @@ class ApiEngineHost(private val context: Context, private val onStateChanged: ()
   /**
    * Runs [block] when the requests before this one are done. Throws [Busy] when [MAX_WAITING]
    * requests already wait, and a 503 when the API is stopping. [block] gets the milliseconds this
-   * request waited.
+   * request waited. [continuing] = a later turn of a request that already had one (the next
+   * sentence of a speech request): it queues behind the others but is never refused for a full
+   * queue, so a response that began is not cut in the middle.
    */
-  suspend fun <T> withTurn(block: suspend (queueMs: Long) -> T): T {
+  suspend fun <T> withTurn(continuing: Boolean = false, block: suspend (queueMs: Long) -> T): T {
     if (closing) throw stoppingError()
     val n = inFlight.incrementAndGet()
-    if (n > 1 + MAX_WAITING) {
+    if (!continuing && n > 1 + MAX_WAITING) {
       inFlight.decrementAndGet()
       throw Busy(((averageTurnMs * (n - 1)) / 1000).toInt().coerceIn(1, 600))
     }
@@ -152,6 +167,14 @@ class ApiEngineHost(private val context: Context, private val onStateChanged: ()
     } finally {
       inFlight.decrementAndGet()
     }
+  }
+
+  /**
+   * A speech or transcription turn's length, for the Retry-After of a full queue (chat answers feed
+   * it in [finish]).
+   */
+  fun noteTurnMs(ms: Long) {
+    if (ms > 0) averageTurnMs = (averageTurnMs * 3 + ms) / 4
   }
 
   /**
@@ -455,6 +478,7 @@ class ApiEngineHost(private val context: Context, private val onStateChanged: ()
         else "${entry.name} was asked for"
       )
     }
+    beforeLoad(entry.name, MemoryRule.needKb(entry.sizeBytes, MemoryRule.CHAT_FACTOR))
     if (!EngineOwnership.reserveForApi(entry.path, this)) throw modelInUse()
     val errors = mutableListOf<String>()
     try {

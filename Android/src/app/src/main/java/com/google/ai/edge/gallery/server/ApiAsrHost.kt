@@ -38,20 +38,32 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 private const val TAG = "MSApiAsr"
 
 /** Samples per call of MediaPipe's transcriber (100 ms, as the app's voice input sends them). */
 private const val MEDIAPIPE_CHUNK_SAMPLES = 1600
 
+/** How long the voice input waits for the API to let go of a speech model it wants to load. */
+private const val YIELD_WAIT_MS = 15_000L
+
+/** The Retry-After of a transcription refused because the voice input has the speech model. */
+private const val VOICE_INPUT_RETRY_S = 10
+
 /**
  * The local API's speech recognition: one speech model loaded at a time, run inside the turns of
  * [turns] (one request at a time across chat and speech, the same queue and limits). The speech
  * model and the chat model may stay loaded side by side, each with its own keep-alive.
  *
- * Phonon-2.5-English runs in [PhononEngine], which the app's voice input shares; a MediaPipe model
- * (Parakeet TDT) gets its own AudioTranscriber here.
+ * Phonon-2.5-English runs in [PhononEngine], which the app's voice input shares. A MediaPipe model
+ * (Parakeet TDT) gets its own AudioTranscriber here, but never while the voice input holds one for
+ * the same file: the voice input comes first. Before it loads that file it makes the API let go
+ * ([EngineOwnership.apiAsrYield]; a transcription that runs ends with a 503), and the API loads it
+ * only after the voice input let go of it while idle ([EngineOwnership.appAsrLetGo]).
  */
 class ApiAsrHost(
   private val context: Context,
@@ -65,6 +77,27 @@ class ApiAsrHost(
   private var unloadJob: Job? = null
   /** Set when the server stops: a running transcription stops at its next window. */
   @Volatile private var closing = false
+  /** Set while the voice input waits for the API to let go of its MediaPipe model. */
+  @Volatile private var voiceInputWants = false
+  /** The MediaPipe model file the API is loading, until it is [loaded] or the load failed. */
+  @Volatile private var loadingPath: String? = null
+  /**
+   * Held while a model loads, transcribes or unloads (all inside the turns of [turns]), so the voice
+   * input can take the model away without waiting for the turn queue.
+   */
+  private val engineLock = Mutex()
+  /** What this host registered in [EngineOwnership.apiAsrYield]. */
+  private val yieldHook: suspend (String) -> Unit = { path -> yieldTo(path) }
+
+  /**
+   * Runs before a speech model loads, inside its turn, with the model's name and what it needs in
+   * kB ([MemoryRule]): the server unloads the API's voice model first when memory is short.
+   */
+  @Volatile var beforeLoad: suspend (name: String, needKb: Long) -> Unit = { _, _ -> }
+
+  init {
+    EngineOwnership.apiAsrYield = yieldHook
+  }
 
   private class Loaded(
     val entry: AsrEntry,
@@ -102,9 +135,11 @@ class ApiAsrHost(
   suspend fun <T> withModelTurn(block: suspend (queueMs: Long) -> T): T =
     turns.withTurn { queueMs ->
       unloadJob?.cancel()
+      val t0 = SystemClock.elapsedRealtime()
       try {
         block(queueMs)
       } finally {
+        turns.noteTurnMs(SystemClock.elapsedRealtime() - t0)
         keepAlive()
       }
     }
@@ -112,42 +147,113 @@ class ApiAsrHost(
   /** Loads [entry] if it is not the loaded model (inside [withModelTurn]). */
   suspend fun load(entry: AsrEntry): LoadInfo {
     val t0 = SystemClock.elapsedRealtime()
-    val l = ensureLoaded(entry)
+    val l = engineLock.withLock { ensureLoaded(entry) }
     return LoadInfo(l.backend, l.backendNote, SystemClock.elapsedRealtime() - t0)
+  }
+
+  /** Unloads the API's speech model for the memory rule or a memory signal (inside the turn lock). */
+  suspend fun unloadForMemory(why: String): Boolean =
+    engineLock.withLock {
+      if (loaded == null) {
+        false
+      } else {
+        unload(why)
+        true
+      }
+    }
+
+  /**
+   * The voice input is about to load the MediaPipe model at [path]: a transcription that runs on it
+   * stops at its next 100 ms of audio (its request answers 503), and the model is unloaded.
+   */
+  private suspend fun yieldTo(path: String) {
+    // loadingPath first: a load clears it only after it set loaded.
+    val loading = loadingPath == path
+    val l = loaded
+    val holds = l != null && l.entry.kind == AsrKind.MEDIAPIPE && l.entry.path == path
+    if (!loading && !holds) return
+    voiceInputWants = true
+    try {
+      val done =
+        withTimeoutOrNull(YIELD_WAIT_MS) {
+          engineLock.withLock {
+            val now = loaded
+            if (now != null && now.entry.kind == AsrKind.MEDIAPIPE && now.entry.path == path) {
+              unload("the voice input loads ${now.entry.name}")
+            }
+          }
+        }
+      if (done == null) Log.w(TAG, "The API still held $path after ${YIELD_WAIT_MS / 1000} s; the voice input loads it anyway")
+    } finally {
+      voiceInputWants = false
+    }
   }
 
   /**
    * Transcribes [audio] (16 kHz mono) with [entry], inside a turn of [turns], after [load].
    * [onPiece] sees each piece as it ends (a Phonon window or a final MediaPipe segment), on the
-   * engine's thread.
+   * engine's thread. Throws [ApiError] 504 when it runs past [limitMs] (checked at each Phonon
+   * window and each 100 ms of MediaPipe audio).
    */
   suspend fun transcribe(
     entry: AsrEntry,
     audio: FloatArray,
+    limitMs: Long,
     onPiece: (TranscriptPiece) -> Unit,
   ): Result {
-    val l = ensureLoaded(entry)
     val job = currentCoroutineContext()[Job]
-    val stopped = { closing || job?.isActive == false }
     val t1 = SystemClock.elapsedRealtime()
+    val late = { SystemClock.elapsedRealtime() - t1 > limitMs }
+    // Kept: the voice input clears voiceInputWants once it has the model, maybe before the catch.
+    var voiceInputTookIt = false
+    val stopped = {
+      if (voiceInputWants) voiceInputTookIt = true
+      closing || voiceInputTookIt || job?.isActive == false || late()
+    }
     val pieces =
-      when (entry.kind) {
-        AsrKind.PHONON ->
-          PhononEngine.run { pipeline ->
-            val out = mutableListOf<TranscriptPiece>()
-            pipeline.transcribe(audio) { w ->
-              val piece = TranscriptPiece(w.text, w.startSeconds, w.endSeconds, w.tokens.map { it.id })
-              out.add(piece)
-              onPiece(piece)
-              if (stopped()) throw CancellationException("The transcription was stopped.")
-            }
-            out
+      try {
+        engineLock.withLock { transcribeWith(entry, ensureLoaded(entry), audio, stopped, onPiece) }
+      } catch (e: CancellationException) {
+        if (job?.isActive != false && !closing) {
+          if (voiceInputTookIt) {
+            throw ApiError(
+              503,
+              "Model Shelf's voice input took ${entry.name}; try again in $VOICE_INPUT_RETRY_S s.",
+              "busy",
+              VOICE_INPUT_RETRY_S,
+            )
           }
-        AsrKind.MEDIAPIPE ->
-          withContext(dispatcher) { mediaPipeTranscribe(l.transcriber!!, audio, stopped, onPiece) }
+          if (late()) {
+            throw ApiError(504, "The transcription took longer than its time limit of ${limitMs / 1000} s; send shorter audio.")
+          }
+        }
+        throw e
       }
     return Result(pieces = pieces, text = joinPieces(pieces), inferenceMs = SystemClock.elapsedRealtime() - t1)
   }
+
+  private suspend fun transcribeWith(
+    entry: AsrEntry,
+    l: Loaded,
+    audio: FloatArray,
+    stopped: () -> Boolean,
+    onPiece: (TranscriptPiece) -> Unit,
+  ): List<TranscriptPiece> =
+    when (entry.kind) {
+      AsrKind.PHONON ->
+        PhononEngine.run { pipeline ->
+          val out = mutableListOf<TranscriptPiece>()
+          pipeline.transcribe(audio) { w ->
+            val piece = TranscriptPiece(w.text, w.startSeconds, w.endSeconds, w.tokens.map { it.id })
+            out.add(piece)
+            onPiece(piece)
+            if (stopped()) throw CancellationException("The transcription was stopped.")
+          }
+          out
+        }
+      AsrKind.MEDIAPIPE ->
+        withContext(dispatcher) { mediaPipeTranscribe(l.transcriber!!, audio, stopped, onPiece) }
+    }
 
   /** Unloads the speech model [DEFAULT_KEEP_ALIVE_MS] after the last request (inside a turn). */
   private fun keepAlive() {
@@ -160,8 +266,10 @@ class ApiAsrHost(
       scope.launch {
         delay(keep)
         turns.underTurnLock {
-          if (loaded === l && System.currentTimeMillis() >= l.expiresAtMs) {
-            unload("keep-alive of ${keep / 1000} s ended")
+          engineLock.withLock {
+            if (loaded === l && System.currentTimeMillis() >= l.expiresAtMs) {
+              unload("keep-alive of ${keep / 1000} s ended")
+            }
           }
         }
       }
@@ -179,42 +287,63 @@ class ApiAsrHost(
     withContext(NonCancellable) {
       beginShutdown()
       scope.cancel()
-      unload("the local API stopped")
+      engineLock.withLock { unload("the local API stopped") }
+      if (EngineOwnership.apiAsrYield === yieldHook) EngineOwnership.apiAsrYield = {}
       dispatcher.close()
     }
 
+  /** Loads [entry] unless it is loaded (holding [engineLock]). */
   private suspend fun ensureLoaded(entry: AsrEntry): Loaded {
     val current = loaded
     if (current != null && current.entry.path == entry.path) return current
     if (current != null) unload("${entry.name} was asked for")
-    val t0 = SystemClock.elapsedRealtime()
-    val l =
-      when (entry.kind) {
-        AsrKind.PHONON -> {
-          val held =
-            try {
-              PhononEngine.acquire(context) { Log.i(TAG, it) }
-            } catch (e: CancellationException) {
-              throw e
-            } catch (e: Exception) {
-              throw ApiError(500, "Model Shelf could not load ${entry.name}: ${e.message}", "load_failed")
-            }
-          Loaded(entry, held.backend.label, held.backendNote, null)
-        }
-        AsrKind.MEDIAPIPE -> loadMediaPipe(entry)
+    val factor = if (entry.kind == AsrKind.MEDIAPIPE) MemoryRule.MEDIAPIPE_ASR_FACTOR else MemoryRule.PHONON_FACTOR
+    beforeLoad(entry.name, MemoryRule.needKb(entry.sizeBytes, factor))
+    // Set before the voice input is asked and cleared after [loaded] is set: a voice input that
+    // starts to load the same file meanwhile sees one or the other and waits for this load.
+    if (entry.kind == AsrKind.MEDIAPIPE) loadingPath = entry.path
+    try {
+      // The voice input comes first: the API loads a MediaPipe model only when the voice input does
+      // not hold the same file (it lets go of it when no dictation runs).
+      if (entry.kind == AsrKind.MEDIAPIPE && !EngineOwnership.appAsrLetGo(entry.path)) {
+        throw ApiError(
+          503,
+          "Model Shelf's voice input is using ${entry.name}; try again in $VOICE_INPUT_RETRY_S s.",
+          "busy",
+          VOICE_INPUT_RETRY_S,
+        )
       }
-    if (closing) {
-      closeLoaded(l)
-      throw ApiError(503, STOPPING_MESSAGE, "stopping")
+      val t0 = SystemClock.elapsedRealtime()
+      val l =
+        when (entry.kind) {
+          AsrKind.PHONON -> {
+            val held =
+              try {
+                PhononEngine.acquire(context) { Log.i(TAG, it) }
+              } catch (e: CancellationException) {
+                throw e
+              } catch (e: Exception) {
+                throw ApiError(500, "Model Shelf could not load ${entry.name}: ${e.message}", "load_failed")
+              }
+            Loaded(entry, held.backend.label, held.backendNote, null)
+          }
+          AsrKind.MEDIAPIPE -> loadMediaPipe(entry)
+        }
+      if (closing) {
+        closeLoaded(l)
+        throw ApiError(503, STOPPING_MESSAGE, "stopping")
+      }
+      loaded = l
+      Log.i(
+        TAG,
+        "Loaded ${entry.name} on ${l.backend.uppercase()} (${l.backendNote}) in " +
+          "${SystemClock.elapsedRealtime() - t0} ms",
+      )
+      onStateChanged()
+      return l
+    } finally {
+      loadingPath = null
     }
-    loaded = l
-    Log.i(
-      TAG,
-      "Loaded ${entry.name} on ${l.backend.uppercase()} (${l.backendNote}) in " +
-        "${SystemClock.elapsedRealtime() - t0} ms",
-    )
-    onStateChanged()
-    return l
   }
 
   private suspend fun loadMediaPipe(entry: AsrEntry): Loaded {
