@@ -38,14 +38,19 @@ misc.xml
 deploymentTargetDropDown.xml
 render.experimental.xml
 
-# Keystore files
+# Keystore files (Model Shelf, round 10d: the PKCS12 names too, review finding 16)
 *.jks
 *.keystore
+*.p12
+*.pfx
+*.pkcs12
 
 # Model Shelf: the release signing values (app/build.gradle.kts) live outside the checkout; a copy that
 # lands in it is never committed
 release-signing.properties
-*signing*.properties
+*signing*.properties*
+keystore.properties
+key.properties
 
 # Google Services (e.g. APIs or Firebase)
 google-services.json

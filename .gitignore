@@ -1,1 +1,11 @@
 .DS_Store
+# Model Shelf: key and signing files never belong in this repository, wherever they land in the
+# checkout (D-614 round 10d, review finding 16; Android/.gitignore has the same names)
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pkcs12
+keystore.properties
+key.properties
+*signing*.properties*

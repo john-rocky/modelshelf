@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+import java.security.KeyStore
+import java.security.cert.X509Certificate
 import java.util.Properties
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
@@ -34,10 +36,15 @@ plugins {
 //   3. a properties file outside the checkout with the keys storeFile, storePassword, keyAlias and
 //      keyPassword: -Pmodelshelf.release.signing=<file> or MODELSHELF_RELEASE_SIGNING=<file>, else
 //      ~/.modelshelf/release-signing.properties
-// The keystore path is absolute (a relative one is read from this app module's folder). Without all four
-// values, or without the keystore file, the tasks that make a signed release (assembleRelease,
-// bundleRelease and the packaging and signing tasks under them) stop before any task runs, with one
-// sentence; debug builds and unit tests never read these values.
+// The keystore path is absolute (`~/` is the home folder) and outside this checkout. Without all four
+// values, without the keystore file, with a relative path or one inside the checkout, the tasks that
+// make a signed release (assembleRelease, bundleRelease and the packaging and signing tasks under them)
+// stop before any task runs, with one sentence. They also stop when the key is the debug key (its alias,
+// its file, or its certificate "Android Debug") and when Android Studio's signing properties
+// (android.injected.signing.*) are set: those sign with a key this file does not check (D-614 round 10d,
+// review finding 15). The values are read on every Gradle run; a properties file that cannot be read
+// stops only the release tasks. Pass the passwords through the environment or the file: a
+// -Pmodelshelf.release.storePassword=... argument shows in the process list and the shell's history.
 val releaseSigningKeys = listOf("storeFile", "storePassword", "keyAlias", "keyPassword")
 val releaseSigningFile: File =
   file(
@@ -45,9 +52,21 @@ val releaseSigningFile: File =
       ?: System.getenv("MODELSHELF_RELEASE_SIGNING")?.takeIf { it.isNotBlank() }
       ?: "${System.getProperty("user.home")}/.modelshelf/release-signing.properties"
   )
+// A properties file that cannot be read: it stops the release tasks only (D-614 round 10d).
+val releaseSigningUnreadable: List<String> =
+  if (!releaseSigningFile.isFile) emptyList()
+  else
+    try {
+      releaseSigningFile.inputStream().use { Properties().load(it) }
+      emptyList()
+    } catch (e: Exception) {
+      listOf("a properties file that can be read (${releaseSigningFile.path})")
+    }
 val releaseSigning: Map<String, String> = run {
   val fromFile = Properties()
-  if (releaseSigningFile.isFile) releaseSigningFile.inputStream().use { fromFile.load(it) }
+  if (releaseSigningFile.isFile && releaseSigningUnreadable.isEmpty()) {
+    releaseSigningFile.inputStream().use { fromFile.load(it) }
+  }
   releaseSigningKeys
     .mapNotNull { key ->
       val env = "MODELSHELF_RELEASE_" + key.replace(Regex("([A-Z])"), "_$1").uppercase()
@@ -59,13 +78,59 @@ val releaseSigning: Map<String, String> = run {
     }
     .toMap()
 }
+// The keystore file: `~/` is the home folder; a relative path is not taken.
+val releaseStoreFile: File? =
+  releaseSigning["storeFile"]?.let { raw ->
+    val expanded = if (raw.startsWith("~/")) System.getProperty("user.home") + raw.substring(1) else raw
+    File(expanded).takeIf { it.isAbsolute }?.canonicalFile
+  }
+// The checkout this file is in (Android/src is two folders below it).
+val releaseCheckout: File = rootProject.projectDir.resolve("../..").canonicalFile
 val releaseSigningMissing: List<String> =
-  releaseSigningKeys.filter { it !in releaseSigning } +
+  releaseSigningUnreadable +
+    releaseSigningKeys.filter { it !in releaseSigning } +
     listOfNotNull(
-      releaseSigning["storeFile"]
-        ?.takeIf { !file(it).isFile }
-        ?.let { "a keystore file at $it" }
+      releaseSigning["storeFile"]?.let { raw ->
+        val store = releaseStoreFile
+        when {
+          store == null -> "an absolute keystore path (not $raw)"
+          !store.isFile -> "a keystore file at ${store.path}"
+          store.path.startsWith(releaseCheckout.path + File.separator) ->
+            "a keystore outside the checkout (${store.path} is inside ${releaseCheckout.path})"
+          else -> null
+        }
+      }
     )
+// Android Studio's signed-build dialog sets these; the release would be signed with their key.
+val releaseSigningInjected: List<String> =
+  listOf("store.file", "store.password", "key.alias", "key.password")
+    .map { "android.injected.signing.$it" }
+    .filter { findProperty(it) != null }
+
+// Whether the release key is the debug key: its alias, its file, or its certificate. Read only when a
+// release task runs (the certificate needs the store's password).
+fun releaseKeyIsDebugKey(): String? {
+  val store = releaseStoreFile ?: return null
+  if (releaseSigning["keyAlias"].equals("androiddebugkey", ignoreCase = true)) {
+    return "its alias is androiddebugkey"
+  }
+  val debugStore = File(System.getProperty("user.home"), ".android/debug.keystore")
+  if (debugStore.isFile && store == debugStore.canonicalFile) return "its file is ${debugStore.path}"
+  return try {
+    val keyStore = KeyStore.getInstance(KeyStore.getDefaultType())
+    store.inputStream().use {
+      keyStore.load(it, releaseSigning.getValue("storePassword").toCharArray())
+    }
+    val certificate =
+      keyStore.getCertificate(releaseSigning.getValue("keyAlias")) as? X509Certificate
+    if (certificate?.subjectX500Principal?.name?.contains("CN=Android Debug") == true) {
+      "its certificate is Android Debug"
+    } else null
+  } catch (e: Exception) {
+    // The store does not open with these values: the signing task says so itself.
+    null
+  }
+}
 
 android {
   namespace = "com.google.ai.edge.gallery"
@@ -96,7 +161,7 @@ android {
     // Filled only when every value is there; otherwise the release tasks stop (see the end of this file).
     create("release") {
       if (releaseSigningMissing.isEmpty()) {
-        storeFile = file(releaseSigning.getValue("storeFile"))
+        storeFile = releaseStoreFile
         storePassword = releaseSigning.getValue("storePassword")
         keyAlias = releaseSigning.getValue("keyAlias")
         keyPassword = releaseSigning.getValue("keyPassword")
@@ -178,6 +243,10 @@ dependencies {
   implementation(libs.camerax.lifecycle)
   implementation(libs.camerax.view)
   implementation(libs.openid.appauth)
+  // Model Shelf: the Custom Tabs of openExternalPage. Declared here, at the version AppAuth brought
+  // in before (1.3.0): a library that only comes through another one goes when that one goes (round
+  // 10d; the same trap as androidx.documentfile when Firebase went).
+  implementation(libs.androidx.browser)
   implementation(libs.androidx.splashscreen)
   implementation(libs.protobuf.javalite)
   implementation(libs.protobuf.kotlin.lite)
@@ -244,7 +313,7 @@ val releaseSigningTasks =
   Regex(
     "^(assembleRelease|bundleRelease|packageRelease|packageReleaseBundle|signReleaseBundle|" +
       "validateSigningRelease|installRelease|packageReleaseUniversalApk|" +
-      "(makeApkFromBundleFor|extractApksFor)Release)$"
+      "(makeApkFromBundleFor|extractApksFor|extractApksFromBundleFor)Release)$"
   )
 gradle.taskGraph.whenReady {
   val needsKey =
@@ -252,6 +321,14 @@ gradle.taskGraph.whenReady {
       it.path.startsWith("${project.path}:") &&
         releaseSigningTasks.matches(it.path.substringAfterLast(':'))
     }
+  if (needsKey.isNotEmpty() && releaseSigningInjected.isNotEmpty()) {
+    throw GradleException(
+      "The release build stops: Android Studio's signing properties are set " +
+        "(${releaseSigningInjected.joinToString()}), and ${needsKey.first().path} would sign with " +
+        "their key, which this build does not check: build the release with the Model Shelf values " +
+        "(see app/build.gradle.kts) instead."
+    )
+  }
   if (needsKey.isNotEmpty() && releaseSigningMissing.isNotEmpty()) {
     throw GradleException(
       "The release build has no release key (missing: ${releaseSigningMissing.joinToString()}), so " +
@@ -262,5 +339,13 @@ gradle.taskGraph.whenReady {
         "file outside the checkout (${releaseSigningFile.path}, or the file that " +
         "-Pmodelshelf.release.signing or MODELSHELF_RELEASE_SIGNING names)."
     )
+  }
+  if (needsKey.isNotEmpty()) {
+    releaseKeyIsDebugKey()?.let { why ->
+      throw GradleException(
+        "The release build stops: the release key is the debug key ($why), and " +
+          "${needsKey.first().path} never signs a release with it."
+      )
+    }
   }
 }
