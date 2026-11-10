@@ -602,13 +602,13 @@ class ApiServer(
             catalog.findAsr(request.model) != null ->
               ApiError(
                 400,
-                "\"${request.model}\" is a speech recognition model. Name a text-to-speech model; " +
-                  "GET /v1/models lists them.",
+                "\"${request.model}\" is a speech recognition model, not a text-to-speech model " +
+                  "(GET /v1/models lists them).",
               )
             catalog.find(request.model) != null ->
               ApiError(
                 400,
-                "\"${request.model}\" is a chat model. Name a text-to-speech model; GET /v1/models lists them.",
+                "\"${request.model}\" is a chat model, not a text-to-speech model (GET /v1/models lists them).",
               )
             else ->
               ApiError(

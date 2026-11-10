@@ -43,6 +43,12 @@ class ApiTtsProtocolTest {
     throw AssertionError()
   }
 
+  /** One sentence: a full stop at the end and none before a new sentence inside. */
+  private fun assertOneSentence(message: String) {
+    assertTrue(message, message.endsWith("."))
+    assertFalse(message, Regex("""\. +[A-Z]""").containsMatchIn(message))
+  }
+
   private val kokoroVoices = listOf("af_heart", "af_alloy", "af_aoede", "af_bella", "af_jessica", "af_kore", "af_nicole", "af_nova", "af_river", "bf_emma")
 
   private val kokoro =
@@ -85,12 +91,14 @@ class ApiTtsProtocolTest {
     assertRefused(400) { parseSpeechRequest("""{"model":"m"}""") }
     val empty = assertRefused(400) { parseSpeechRequest("""{"model":"m","input":""}""") }
     assertTrue(empty.message, empty.message.contains("empty"))
+    assertOneSentence(empty.message)
     assertRefused(400) { parseSpeechRequest("""{"model":"m","input":"   \n "}""") }
     assertRefused(400) { parseSpeechRequest("""{"model":"m","input":42}""") }
     val max = "a".repeat(MAX_SPEECH_INPUT_CHARS)
     assertEquals(MAX_SPEECH_INPUT_CHARS, parseSpeechRequest("""{"model":"m","input":"$max"}""").inputChars)
     val long = assertRefused(400) { parseSpeechRequest("""{"model":"m","input":"${max}b"}""") }
     assertTrue(long.message, long.message.contains("4097 characters") && long.message.contains("4096"))
+    assertOneSentence(long.message)
   }
 
   @Test
@@ -147,6 +155,7 @@ class ApiTtsProtocolTest {
     assertEquals("invalid_voice", e.code)
     assertTrue(e.message, e.message.contains("\"alloy\" is not in litert-community/Kokoro-82M"))
     assertTrue(e.message, e.message.contains("af_heart, af_alloy") && e.message.contains("and 2 more"))
+    assertOneSentence(e.message)
     // The list the loaded model gives wins over the model list's.
     assertRefused(400) { resolveSpeechVoice("bf_emma", kokoro, listOf("af_heart")) }
   }

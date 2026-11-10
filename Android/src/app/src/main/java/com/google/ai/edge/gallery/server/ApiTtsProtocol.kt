@@ -116,7 +116,7 @@ fun parseSpeechRequest(body: String): SpeechRequest {
     throw ApiError(
       400,
       "\"input\" has $chars characters; Model Shelf speaks at most $MAX_SPEECH_INPUT_CHARS per " +
-        "request. Send the text in parts.",
+        "request, so send the text in parts.",
     )
   }
   val voice = o.voiceField()
@@ -155,7 +155,7 @@ fun resolveSpeechVoice(requested: String?, entry: TtsEntry, voices: List<String>
   val more = if (voices.size > VOICES_IN_A_SENTENCE) " and ${voices.size - VOICES_IN_A_SENTENCE} more" else ""
   throw ApiError(
     400,
-    "Voice \"$wanted\" is not in ${entry.name}. It has $named$more; GET /v1/models lists them all.",
+    "Voice \"$wanted\" is not in ${entry.name}, which has $named$more (GET /v1/models lists them all).",
     "invalid_voice",
   )
 }
