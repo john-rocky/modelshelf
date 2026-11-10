@@ -58,6 +58,7 @@ import com.google.ai.edge.gallery.ui.common.ModelPageAppBar
 import com.google.ai.edge.gallery.ui.common.chat.ModelDownloadStatusInfoPanel
 import com.google.ai.edge.gallery.ui.modelmanager.ModelManagerViewModel
 import com.google.ai.edge.gallery.ui.theme.customColors
+import com.google.ai.edge.gallery.ui.navigation.LocalModelScreenLeft
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
@@ -100,9 +101,11 @@ fun LlmSingleTurnScreen(
   }
 
   // Initialize model when model/download state changes.
+  // Model Shelf: a screen a link replaces loads nothing while it slides out (D-614 round 10d).
+  val screenLeft = LocalModelScreenLeft.current
   val curDownloadStatus = modelManagerUiState.modelDownloadStatus[selectedModel.name]
   LaunchedEffect(curDownloadStatus, selectedModel.name) {
-    if (!navigatingUp) {
+    if (!navigatingUp && !screenLeft()) {
       if (curDownloadStatus?.status == ModelDownloadStatusType.SUCCEEDED) {
         Log.d(
           TAG,

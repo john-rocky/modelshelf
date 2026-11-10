@@ -17,9 +17,11 @@
 package com.google.ai.edge.gallery.ui.navigation
 
 import android.util.Log
+import androidx.compose.runtime.staticCompositionLocalOf
 import com.google.ai.edge.gallery.data.DEEP_LINK_SCHEME
 import com.google.ai.edge.gallery.data.Model
 import com.google.ai.edge.gallery.data.Task
+import kotlinx.coroutines.channels.Channel
 
 /**
  * Model Shelf: a link that reached the app, in the parts the app reads (Android's Uri gives them;
@@ -93,107 +95,171 @@ internal interface LinkScreens {
   fun log(priority: Int, line: String)
 }
 
-/** Handles a link: opens its screen, or says why not. */
-internal fun handleLink(link: LinkParts, screens: LinkScreens) {
-  screens.log(
-    Log.DEBUG,
-    "navigation link clicked: ${link.text} (new intents so far: ${link.number})",
-  )
-  // 1. Precise model deep links: <DEEP_LINK_SCHEME>://model/<taskId>/<modelName>
+/** Model Shelf: the sentence a link gets when it opens no screen of the app. */
+internal const val LINK_OPENS_NOTHING = "This link does not open a screen of Model Shelf."
+
+/**
+ * Handles a link: opens its screen, or says why not (D-614 round 10d).
+ *
+ * - `<scheme>://model/<task id>/<model name>[?query=…]`: the task must be one of the app's and list
+ *   the model; `<scheme>://<task id>[?query=…]`: the task's first downloaded model (else its first);
+ *   then [openModelScreen].
+ * - `<scheme>://global_model_manager` and `<scheme>://import`: the model manager, unless it is on
+ *   top already.
+ * - Anything else opens nothing and the user reads [LINK_OPENS_NOTHING].
+ *
+ * No log line carries the link or its question (review finding 14): the lines name only a task id
+ * and a model name of the app.
+ */
+internal suspend fun handleLink(link: LinkParts, screens: LinkScreens) {
+  val label = "Link ${link.number}"
+  screens.log(Log.INFO, "$label arrived")
   if (link.text.startsWith("$DEEP_LINK_SCHEME://model/")) {
-    if (link.pathSegments.size >= 2) {
-      val taskId = link.pathSegments[link.pathSegments.size - 2]
-      val modelName = link.pathSegments.last()
-      val queryStr = link.query
-      screens.modelByName(modelName)?.let { model ->
-        val route =
-          if (!queryStr.isNullOrEmpty()) {
-            "$ROUTE_MODEL/${taskId}/${model.name}?query=${screens.encodeQuery(queryStr)}"
-          } else {
-            "$ROUTE_MODEL/${taskId}/${model.name}"
-          }
-        // Model Shelf: a link to the chat that is open already (no question) leaves it as it is
-        // instead of opening a second copy of it on top.
-        val current = screens.openModelScreen()?.takeIf { it.onTop }
-        val sameChatOpen =
-          queryStr.isNullOrEmpty() &&
-            current != null &&
-            current.taskId == taskId &&
-            current.modelName == model.name
-        val sentence = if (sameChatOpen) null else screens.gate(model)
-        if (sameChatOpen) {
-          screens.log(Log.DEBUG, "The link's chat is open already: $route")
-        } else if (sentence != null) {
-          screens.log(Log.INFO, "The link's screen does not open: $sentence ($route)")
-          screens.showSentence(sentence)
-        } else {
-          screens.navigate(route)
-        }
-      }
-    } else {
-      screens.log(Log.ERROR, "Malformed deep link URI received: ${link.text}")
+    // 1. Precise model deep links: <DEEP_LINK_SCHEME>://model/<taskId>/<modelName>
+    val task = link.pathSegments.getOrNull(0)?.let { id -> screens.tasks.find { it.id == id } }
+    val model = link.pathSegments.getOrNull(1)?.let { name -> task?.models?.find { it.name == name } }
+    when {
+      link.pathSegments.size != 2 -> opensNothing(label, "not a task and a model", screens)
+      task == null -> opensNothing(label, "no such task", screens)
+      model == null -> opensNothing(label, "the task does not list that model", screens)
+      else -> openModelScreen(task, model, link.query, label, screens)
     }
   } else if (link.host == "global_model_manager" || link.host == "import") {
-    val route = ROUTE_MODEL_MANAGER
-    screens.navigate(route)
+    if (screens.topRoute()?.startsWith(ROUTE_MODEL_MANAGER) == true) {
+      screens.log(Log.INFO, "$label: the model manager is open already")
+    } else {
+      navigateOrSay(ROUTE_MODEL_MANAGER, popUpToRoute = null, label, screens)
+      screens.log(Log.INFO, "$label: opened the model manager")
+    }
   } else {
     // 2. Dynamic task-level deep links: <DEEP_LINK_SCHEME>://<taskId>
-    val host = link.host
-    if (host != null) {
-      val queryStr = link.query
-      val task = screens.tasks.find { it.id == host }
-      if (task != null) {
-        // Pick the first successfully downloaded model or the default active model for this task
-        val defaultModel =
-          task.models.firstOrNull { model -> screens.downloadSucceeded(model) }
-            ?: task.models.firstOrNull()
-
-        if (defaultModel != null) {
-          val route =
-            if (!queryStr.isNullOrEmpty()) {
-              "$ROUTE_MODEL/${task.id}/${defaultModel.name}?query=${screens.encodeQuery(queryStr)}"
-            } else {
-              "$ROUTE_MODEL/${task.id}/${defaultModel.name}"
-            }
-          val sentence = screens.gate(defaultModel)
-          if (sentence != null) {
-            screens.log(Log.INFO, "The link's screen does not open: $sentence ($route)")
-            screens.showSentence(sentence)
-          } else {
-            screens.navigate(route)
-          }
-        } else {
-          screens.log(Log.ERROR, "No available model found for task: $host")
-        }
-      }
+    val task = link.host?.let { id -> screens.tasks.find { it.id == id } }
+    if (task == null) {
+      opensNothing(label, "no such task", screens)
+      return
+    }
+    // Pick the first successfully downloaded model or the default active model for this task
+    val model =
+      task.models.firstOrNull { model -> screens.downloadSucceeded(model) }
+        ?: task.models.firstOrNull()
+    if (model == null) {
+      opensNothing(label, "the task lists no model", screens)
+    } else {
+      openModelScreen(task, model, link.query, label, screens)
     }
   }
-}
-
-/** The model manager opens [model] under [task]. */
-internal fun openModelFromManager(task: Task, model: Model, screens: LinkScreens) {
-  screens.navigate("$ROUTE_MODEL/${task.id}/${model.name}")
 }
 
 /**
- * Model Shelf: where the link of the intent that reached the activity last waits until the screens
- * read it. One place: an intent that comes before the screens read the last one replaces it (as the
- * activity's own intent did).
+ * The model manager opens [model] under [task]: the same way as a link (the gate, and the open
+ * model screen is left first), so the manager can no longer stack a screen on a chat or replace a
+ * chat's session with a refused load (review finding 3).
  */
-class LinkInbox<T : Any> {
-  private var waiting: T? = null
+internal suspend fun openModelFromManager(task: Task, model: Model, screens: LinkScreens) {
+  openModelScreen(task, model, query = null, label = "The model manager", screens = screens)
+}
 
-  /** The link of the intent that reached the activity now (null when it carries none). */
-  @Synchronized
-  fun offer(link: T?) {
-    waiting = link
+/**
+ * Model Shelf: the one way a link or the model manager opens a model screen (D-614 round 10d). The
+ * app keeps one model screen: a second one on top shared the first one's model object, engine and
+ * executor session, and leaving either broke the other (review findings 1-4).
+ *
+ * - The open model screen is [task]'s with [model]: it stays (the manager or anything above it
+ *   closes); a question goes to it, and Agent Chat asks the user before sending it.
+ * - Else the gate: while a chat engine answers, or the local API holds [model]'s file while a chat
+ *   engine is alive, nothing changes and the user reads the gate's sentence.
+ * - Else the open model screen is left the way Back leaves it (its models cleaned up, waited for),
+ *   [model] is selected (so the new screen loads it and nothing else, finding 6), and [task]'s
+ *   screen of [model] replaces the open one.
+ */
+internal suspend fun openModelScreen(
+  task: Task,
+  model: Model,
+  query: String?,
+  label: String,
+  screens: LinkScreens,
+) {
+  val open = screens.openModelScreen()
+  if (open != null && open.taskId == task.id && open.modelName == model.name) {
+    if (!open.onTop) screens.popBackTo(open.route)
+    if (!query.isNullOrEmpty()) screens.deliverQuery(task.id, model.name, query)
+    screens.log(Log.INFO, "$label: the chat of ${task.id}/${model.name} is open already")
+    return
   }
-
-  /** The link waiting to be read, or null; it is read once. */
-  @Synchronized
-  fun take(): T? {
-    val link = waiting
-    waiting = null
-    return link
+  val sentence = screens.gate(model)
+  if (sentence != null) {
+    screens.log(Log.INFO, "$label: no screen opens ($sentence)")
+    screens.showSentence(sentence)
+    return
+  }
+  try {
+    if (open != null) {
+      screens.log(Log.INFO, "$label: leaving the chat of ${open.taskId}/${open.modelName} first")
+      screens.leave(open)
+    }
+    screens.selectModel(model)
+    val route =
+      if (!query.isNullOrEmpty()) {
+        "$ROUTE_MODEL/${task.id}/${model.name}?query=${screens.encodeQuery(query)}"
+      } else {
+        "$ROUTE_MODEL/${task.id}/${model.name}"
+      }
+    if (navigateOrSay(route, popUpToRoute = open?.route, label, screens)) {
+      screens.log(Log.INFO, "$label: opened ${task.id}/${model.name}")
+    }
+  } finally {
+    screens.endGate()
   }
 }
+
+private fun opensNothing(label: String, why: String, screens: LinkScreens) {
+  screens.log(Log.INFO, "$label: opens no screen ($why)")
+  screens.showSentence(LINK_OPENS_NOTHING)
+}
+
+/** Navigates; a route no screen matches opens nothing and says so instead of ending the process. */
+private fun navigateOrSay(
+  route: String,
+  popUpToRoute: String?,
+  label: String,
+  screens: LinkScreens,
+): Boolean =
+  try {
+    screens.navigate(route, popUpToRoute)
+    true
+  } catch (e: IllegalArgumentException) {
+    opensNothing(label, "no screen has its route", screens)
+    false
+  }
+
+/**
+ * Model Shelf: where the links of the intents that reached the activity wait until the screens read
+ * them, in the order they came (D-614 round 10d: one place before, so a link that came before the
+ * screens read the last one replaced it and the first was lost, review finding 13). An intent with
+ * no link takes nothing away.
+ */
+class LinkInbox<T : Any> {
+  private val links = Channel<T>(Channel.UNLIMITED)
+
+  /** The link of an intent that reached the activity (null when it carries none). */
+  fun offer(link: T?) {
+    if (link != null) links.trySend(link)
+  }
+
+  /** The link that came first and is not read yet, or null. */
+  fun take(): T? = links.tryReceive().getOrNull()
+
+  /** Waits for a link and returns it. */
+  suspend fun receive(): T = links.receive()
+}
+
+/**
+ * Model Shelf: whether the model screen around a composable is being left because a link (or the
+ * model manager) replaces it. Its model-load effects then start nothing: while it slides out it
+ * still sees the model selected for the screen that replaces it, and would load that model under
+ * its own task (D-614 round 10d).
+ */
+val LocalModelScreenLeft = staticCompositionLocalOf<() -> Boolean> { { false } }
+
+/** Model Shelf: the key of [LocalModelScreenLeft]'s flag in a model screen's saved state. */
+internal const val MODEL_SCREEN_LEFT_KEY = "model_shelf_screen_left"

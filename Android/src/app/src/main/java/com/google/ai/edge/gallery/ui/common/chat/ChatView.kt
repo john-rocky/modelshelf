@@ -93,6 +93,7 @@ import com.google.ai.edge.gallery.ui.common.saveBitmapToMediaStore
 import com.google.ai.edge.gallery.ui.common.shareBitmap
 import com.google.ai.edge.gallery.ui.common.tts.rememberChatTtsController
 import com.google.ai.edge.gallery.ui.modelmanager.ModelManagerViewModel
+import com.google.ai.edge.gallery.ui.navigation.LocalModelScreenLeft
 import kotlinx.coroutines.launch
 
 private const val TAG = "AGChatView"
@@ -173,9 +174,11 @@ fun ChatView(
   }
 
   // Initialize model when model/download state changes.
+  // Model Shelf: a screen a link replaces loads nothing while it slides out (D-614 round 10d).
+  val screenLeft = LocalModelScreenLeft.current
   val curDownloadStatus = modelManagerUiState.modelDownloadStatus[selectedModel.name]
   LaunchedEffect(curDownloadStatus, selectedModel.name) {
-    if (!navigatingUp) {
+    if (!navigatingUp && !screenLeft()) {
       if (curDownloadStatus?.status == ModelDownloadStatusType.SUCCEEDED) {
         Log.d(TAG, "Initializing model '${selectedModel.name}' from ChatView launched effect")
         modelManagerViewModel.initializeModel(context, task = task, model = selectedModel)

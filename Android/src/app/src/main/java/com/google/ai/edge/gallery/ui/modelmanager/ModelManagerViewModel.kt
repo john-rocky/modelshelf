@@ -1499,6 +1499,17 @@ constructor(
   /** Model Shelf: the link of the intent that reached the activity last, until the screens read it. */
   val linkInbox = LinkInbox<Uri>()
 
+  /** Model Shelf: a question a link brought to the model screen that is open (it stays). */
+  data class LinkQuery(val taskId: String, val modelName: String, val query: String)
+
+  private val _linkQuery = MutableStateFlow<LinkQuery?>(null)
+  val linkQuery: StateFlow<LinkQuery?> = _linkQuery.asStateFlow()
+
+  /** Model Shelf: gives a link's [query] to the open screen of [taskId] and [modelName]. */
+  fun deliverLinkQuery(taskId: String, modelName: String, query: String) {
+    _linkQuery.value = LinkQuery(taskId = taskId, modelName = modelName, query = query)
+  }
+
   // Model Shelf: the loads and clean-ups of the screens' models (moved to ModelLoads so the JVM tests
   // run them).
   private val modelLoads =
@@ -1552,8 +1563,11 @@ constructor(
    * Model Shelf: a screen of [task] is left (Back, or a link that replaces it): every model of the
    * task is cleaned up. The job ends when they all are; a load waits for it (D-614 round 10d).
    */
-  fun leaveTask(context: Context, task: Task): Job =
-    modelLoads.leaveTask(context = context, task = task)
+  fun leaveTask(context: Context, task: Task): Job {
+    // A question a link brought to the screen being left stays with it.
+    _linkQuery.value = null
+    return modelLoads.leaveTask(context = context, task = task)
+  }
 
   fun setDownloadStatus(curModel: Model, status: ModelDownloadStatus) {
     // A download that ended without an auth error leaves nothing to ask the user about.

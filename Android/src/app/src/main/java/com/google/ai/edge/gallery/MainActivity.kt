@@ -20,7 +20,6 @@ import android.animation.ObjectAnimator
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
-import android.util.Log
 import android.view.View
 import android.view.WindowManager
 import android.view.animation.DecelerateInterpolator
@@ -46,7 +45,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.core.animation.doOnEnd
-import androidx.core.net.toUri
 import androidx.core.os.bundleOf
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.lifecycle.lifecycleScope
@@ -84,25 +82,20 @@ class MainActivity : ComponentActivity(), VirtualDevicePermissionsHost {
     // and forces the app to start cleanly on the Home Screen after an OS kill.
     super.onCreate(null)
 
-    // Debug: Dump all intent extras to see what FCM unloads
-    intent.extras?.let { extras ->
-      for (key in extras.keySet()) {
-        Log.d(TAG, "onCreate Extra -> Key: $key, Value: ${extras.get(key)}")
-      }
-    }
+    // Model Shelf: the intent's extras are not read nor logged (D-614 round 10d): any app can send
+    // an extra of a class Model Shelf does not have, and reading it ended the process (review
+    // finding 9); their values reached logcat (finding 14).
 
-    // Convert FCM Console data extras to intent data for GalleryNavGraph to pick up
-    intent.getStringExtra("deeplink")?.let { link ->
-      Log.d(TAG, "onCreate: Found deeplink extra: $link")
-      if (link.startsWith("http://") || link.startsWith("https://")) {
-        val browserIntent = Intent(Intent.ACTION_VIEW, link.toUri())
-        startActivity(browserIntent)
-      } else {
-        intent.data = link.toUri()
-      }
+    // Model Shelf: the "deeplink" extra (Firebase Cloud Messaging's data, turned into the intent's
+    // link, or an http(s) page opened in the browser with no question) is not read: the fork has no
+    // Firebase and nothing in it sends the extra (the reminders' notifications put their link in
+    // the intent's data), and another app could open any page through it (D-614 round 10d).
+
+    // Model Shelf: the link waits here until the screens read it. An activity made again (a
+    // configuration change) gets the intent it started with again; its link was read already.
+    if (savedInstanceState == null) {
+      modelManagerViewModel.linkInbox.offer(intent.data)
     }
-    // Model Shelf: the link waits here until the screens read it.
-    modelManagerViewModel.linkInbox.offer(intent.data)
 
     fun setContent() {
       if (contentSet) {
@@ -202,22 +195,9 @@ class MainActivity : ComponentActivity(), VirtualDevicePermissionsHost {
     super.onNewIntent(intent)
     setIntent(intent)
 
-    // Debug: Dump all intent extras to see what FCM unloads
-    intent.extras?.let { extras ->
-      for (key in extras.keySet()) {
-        Log.d(TAG, "onNewIntent Extra -> Key: $key, Value: ${extras.get(key)}")
-      }
-    }
+    // Model Shelf: the intent's extras are not read nor logged, the "deeplink" extra included (see
+    // onCreate).
 
-    intent.getStringExtra("deeplink")?.let { link ->
-      Log.d(TAG, "onNewIntent: Found deeplink extra: $link")
-      if (link.startsWith("http://") || link.startsWith("https://")) {
-        val browserIntent = Intent(Intent.ACTION_VIEW, link.toUri())
-        startActivity(browserIntent)
-      } else {
-        intent.data = link.toUri()
-      }
-    }
     // Model Shelf: the link waits here until the screens read it.
     modelManagerViewModel.linkInbox.offer(intent.data)
   }

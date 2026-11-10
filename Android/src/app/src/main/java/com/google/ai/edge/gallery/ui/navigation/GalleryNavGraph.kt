@@ -41,6 +41,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
@@ -96,7 +97,10 @@ import com.google.ai.edge.gallery.ui.modelmanager.isSavedModelSelectionComplete
 import com.google.ai.edge.gallery.ui.modelmanager.stopActiveVoicePreview
 import com.google.ai.edge.gallery.ui.notifications.NotificationsScreen
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 private const val TAG = "AGGalleryNavGraph"
 private const val ROUTE_HOMESCREEN = "homepage"
@@ -168,6 +172,22 @@ fun GalleryNavHost(
   // The section the model selection screen expands when a task sends the user back to it.
   var modelSelectionTargetToExpand by remember { mutableStateOf<ModelSelectionTarget?>(null) }
   val modelManagerUiState by modelManagerViewModel.uiState.collectAsState()
+
+  // Model Shelf: links and the model manager open model screens one way (LinkHandling.kt), one at a
+  // time (D-614 round 10d).
+  val linkContext = LocalContext.current
+  var linkSentence by remember { mutableStateOf<String?>(null) }
+  val linkScope = rememberCoroutineScope()
+  val screensMutex = remember { Mutex() }
+  val linkScreens =
+    remember(navController, modelManagerViewModel, linkContext) {
+      NavLinkScreens(
+        navController = navController,
+        modelManagerViewModel = modelManagerViewModel,
+        context = linkContext,
+        onSentence = { linkSentence = it },
+      )
+    }
 
   // Track whether app is in foreground.
   DisposableEffect(lifecycleOwner) {
@@ -304,10 +324,21 @@ fun GalleryNavHost(
     ) { backStackEntry ->
       val modelName = backStackEntry.arguments?.getString("modelName") ?: ""
       val taskId = backStackEntry.arguments?.getString("taskId") ?: ""
-      val queryParam = backStackEntry.arguments?.getString("query")
+      // Model Shelf: a question a link brought to this open screen (it stays; D-614 round 10d) comes
+      // in place of the route's own.
+      val linkQuery by modelManagerViewModel.linkQuery.collectAsState()
+      val queryParam =
+        linkQuery?.takeIf { it.taskId == taskId && it.modelName == modelName }?.query
+          ?: backStackEntry.arguments?.getString("query")
       val scope = rememberCoroutineScope()
       val context = LocalContext.current
 
+      // Model Shelf: set when a link (or the model manager) replaces this screen (D-614 round 10d).
+      val screenLeft =
+        remember(backStackEntry) {
+          backStackEntry.savedStateHandle.getStateFlow(MODEL_SCREEN_LEFT_KEY, false)
+        }
+      CompositionLocalProvider(LocalModelScreenLeft provides { screenLeft.value }) {
       modelManagerViewModel.getModelByName(name = modelName)?.let { initialModel ->
         val customTask = modelManagerViewModel.getCustomTaskByTaskId(id = taskId)
         // A task with a model selection screen only starts with a complete saved selection. Entry
@@ -440,6 +471,7 @@ fun GalleryNavHost(
           }
         }
       }
+      }
     }
 
     // Global model manager page.
@@ -475,7 +507,6 @@ fun GalleryNavHost(
       },
     ) { backStackEntry ->
       val importUrl = backStackEntry.arguments?.getString(ARG_IMPORT_URL)
-      val managerContext = LocalContext.current
       GlobalModelManager(
         viewModel = modelManagerViewModel,
         tosViewModel = tosViewModel,
@@ -486,17 +517,11 @@ fun GalleryNavHost(
           navController.navigateUp()
         },
         onModelSelected = { task, model ->
-          openModelFromManager(
-            task = task,
-            model = model,
-            screens =
-              NavLinkScreens(
-                navController = navController,
-                modelManagerViewModel = modelManagerViewModel,
-                context = managerContext,
-                onSentence = {},
-              ),
-          )
+          linkScope.launch {
+            screensMutex.withLock {
+              openModelFromManager(task = task, model = model, screens = linkScreens)
+            }
+          }
         },
         onBenchmarkClicked = { model ->
           firebaseAnalytics?.logEvent(
@@ -548,50 +573,32 @@ fun GalleryNavHost(
     )
   }
 
-  // Model Shelf: the sentence a link got instead of its screen
-  // (LlmChatModelHelper.sentenceInsteadOfLinkedScreen), shown over the current screen until Close.
-  val linkContext = LocalContext.current
-  var linkSentence by remember { mutableStateOf<String?>(null) }
+  // Model Shelf: the sentence a link (or the model manager) got instead of its screen, shown over
+  // the current screen until Close.
   linkSentence?.let { sentence -> ErrorDialog(error = sentence, onDismiss = { linkSentence = null }) }
 
   // Handle incoming intents for deep links
   // Model Shelf: MainActivity is singleTask (one screen, so one chat engine), so a link that comes
-  // while the screen runs arrives through onNewIntent. Reading the count of new intents here runs
-  // this part again for each of them.
-  val activity = androidx.activity.compose.LocalActivity.current
-  var newIntents by remember { mutableIntStateOf(0) }
-  DisposableEffect(activity) {
-    val listener = androidx.core.util.Consumer<android.content.Intent> { newIntents++ }
-    (activity as? androidx.activity.ComponentActivity)?.addOnNewIntentListener(listener)
-    onDispose {
-      (activity as? androidx.activity.ComponentActivity)?.removeOnNewIntentListener(listener)
-    }
-  }
-  val intentsSeen = newIntents
-  // Wait until the model manager has been initialized and the tasks are available.
-  val data =
-    if (modelManagerUiState.tasks.isNotEmpty()) modelManagerViewModel.linkInbox.take() else null
-  if (data != null) {
-    activity?.intent?.data = null
-    var sentence: String? = null
-    handleLink(
-      link =
+  // while the screen runs arrives through onNewIntent. The links wait in the model manager's inbox
+  // and are read here one at a time, in the order they came, off the composition: opening a link's
+  // screen may first wait for the open chat's engine to close (D-614 round 10d).
+  LaunchedEffect(Unit) {
+    // Wait until the model manager has been initialized and the tasks are available.
+    modelManagerViewModel.uiState.first { it.tasks.isNotEmpty() }
+    var number = 0
+    while (true) {
+      val data = modelManagerViewModel.linkInbox.receive()
+      number++
+      val link =
         LinkParts(
           text = data.toString(),
           host = data.host,
           pathSegments = data.pathSegments,
           query = if (data.isHierarchical) data.getQueryParameter("query") else null,
-          number = intentsSeen,
-        ),
-      screens =
-        NavLinkScreens(
-          navController = navController,
-          modelManagerViewModel = modelManagerViewModel,
-          context = linkContext,
-          onSentence = { sentence = it },
-        ),
-    )
-    sentence?.let { shown -> SideEffect { linkSentence = shown } }
+          number = number,
+        )
+      screensMutex.withLock { handleLink(link = link, screens = linkScreens) }
+    }
   }
 }
 
@@ -638,9 +645,11 @@ private fun CustomTaskScreen(
   BackHandler { handleNavigateUp() }
 
   // Initialize model when model/download state changes.
+  // Model Shelf: a screen a link replaces loads nothing while it slides out (D-614 round 10d).
+  val screenLeft = LocalModelScreenLeft.current
   val curDownloadStatus = modelManagerUiState.modelDownloadStatus[selectedModel.name]
   LaunchedEffect(curDownloadStatus, selectedModel.name) {
-    if (!navigatingUp) {
+    if (!navigatingUp && !screenLeft()) {
       if (curDownloadStatus?.status == ModelDownloadStatusType.SUCCEEDED) {
         Log.d(
           TAG,
@@ -806,8 +815,13 @@ private class NavLinkScreens(
   override fun selectModel(model: Model) = modelManagerViewModel.selectModel(model)
 
   override suspend fun leave(screen: OpenModelScreen) {
+    // The screen loads nothing more (it would see the next screen's model selected).
+    navController.currentBackStack.value
+      .lastOrNull { it.destination.route == screen.route }
+      ?.savedStateHandle
+      ?.set(MODEL_SCREEN_LEFT_KEY, true)
     modelManagerViewModel.getTaskById(screen.taskId)?.let { task ->
-      modelManagerViewModel.leaveTask(context = context, task = task)
+      modelManagerViewModel.leaveTask(context = context, task = task).join()
     }
   }
 
@@ -823,7 +837,8 @@ private class NavLinkScreens(
     navController.popBackStack(route = route, inclusive = false)
   }
 
-  override fun deliverQuery(taskId: String, modelName: String, query: String) {}
+  override fun deliverQuery(taskId: String, modelName: String, query: String) =
+    modelManagerViewModel.deliverLinkQuery(taskId = taskId, modelName = modelName, query = query)
 
   override fun log(priority: Int, line: String) {
     Log.println(priority, TAG, line)
