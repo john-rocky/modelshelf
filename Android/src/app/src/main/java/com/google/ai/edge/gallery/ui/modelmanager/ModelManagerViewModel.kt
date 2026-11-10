@@ -18,6 +18,7 @@ package com.google.ai.edge.gallery.ui.modelmanager
 
 import android.content.Context
 import android.media.AudioTrack
+import android.net.Uri
 import android.util.Log
 import androidx.activity.result.ActivityResult
 import androidx.annotation.MainThread
@@ -97,6 +98,7 @@ import com.google.ai.edge.gallery.services.tts.TtsSettingsRepository
 import com.google.ai.edge.gallery.services.tts.TtsSettingsUiState
 import com.google.ai.edge.gallery.ui.common.isMemoryLow
 import com.google.ai.edge.gallery.ui.llmchat.LlmChatModelHelper
+import com.google.ai.edge.gallery.ui.navigation.LinkInbox
 import com.google.ai.edge.litertlm.Contents
 import com.google.gson.Gson
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -1494,6 +1496,24 @@ constructor(
     cleanupDeletedSpeechModel(model)
   }
 
+  /** Model Shelf: the link of the intent that reached the activity last, until the screens read it. */
+  val linkInbox = LinkInbox<Uri>()
+
+  // Model Shelf: the loads and clean-ups of the screens' models (moved to ModelLoads so the JVM tests
+  // run them).
+  private val modelLoads =
+    ModelLoads(
+      scope = viewModelScope,
+      taskById = { id -> getCustomTaskByTaskId(id = id) },
+      systemPromptOf = { task ->
+        SystemPromptHelper.getEffectiveSystemPrompt(systemPromptRepository, task)
+      },
+      onLoaded = { model ->
+        val backend = getModelCurrentAccelerator(model)
+        initializedBackends.getOrPut(model.name) { ConcurrentHashMap.newKeySet() }.add(backend)
+      },
+    )
+
   fun initializeModel(
     context: Context,
     task: Task,
@@ -1502,66 +1522,14 @@ constructor(
     onDone: () -> Unit = {},
     onError: (String) -> Unit = {},
   ) {
-    viewModelScope.launch {
-      // Skip if initialized already.
-      if (!force && model.initStatusFlow.value is Model.InitializationStatus.Initialized) {
-        Log.d(TAG, "Model '${model.name}' has been initialized. Skipping.")
-        onDone()
-        return@launch
-      }
-
-      // Skip if initialization is in progress.
-      if (model.initializing) {
-        model.cleanUpAfterInit = false
-        Log.d(TAG, "Model '${model.name}' is being initialized. Skipping.")
-        return@launch
-      }
-
-      // Clean up.
-      cleanupModel(context = context, task = task, model = model)
-
-      // Start initialization.
-      Log.d(TAG, "Initializing model '${model.name}'...")
-      model.markInitializationStarted()
-
-      val onDoneFn: (error: String) -> Unit = { error ->
-        if (model.instance != null) {
-          Log.d(TAG, "Model '${model.name}' initialized successfully")
-          val backend = getModelCurrentAccelerator(model)
-          initializedBackends.getOrPut(model.name) { ConcurrentHashMap.newKeySet() }.add(backend)
-
-          if (model.cleanUpAfterInit) {
-            model.markInitializationFailed(
-              IllegalStateException("Model cleaned up after initialization")
-            )
-            Log.d(TAG, "Model '${model.name}' needs cleaning up after init.")
-            cleanupModel(context = context, task = task, model = model)
-          } else {
-            model.markInitialized()
-          }
-          onDone()
-        } else if (error.isNotEmpty()) {
-          model.markInitializationFailed(error)
-          Log.d(TAG, "Model '${model.name}' failed to initialize")
-          onError(error)
-        } else {
-          model.markInitialized(null)
-        }
-      }
-
-      // Call the model initialization function.
-      val systemPrompt = SystemPromptHelper.getEffectiveSystemPrompt(systemPromptRepository, task)
-      withContext(Dispatchers.IO) {
-        getCustomTaskByTaskId(id = task.id)
-          ?.initializeModelFn(
-            context = context,
-            coroutineScope = viewModelScope,
-            model = model,
-            systemInstruction = Contents.of(systemPrompt),
-            onDone = onDoneFn,
-          )
-      }
-    }
+    modelLoads.initializeModel(
+      context = context,
+      task = task,
+      model = model,
+      force = force,
+      onDone = onDone,
+      onError = onError,
+    )
   }
 
   fun cleanupModel(
@@ -1571,39 +1539,18 @@ constructor(
     instanceToCleanUp: Any? = model.instance,
     onDone: () -> Unit = {},
   ) {
-    if (instanceToCleanUp != null && instanceToCleanUp !== model.instance) {
-      Log.d(TAG, "Stale cleanup request for ${model.name}. Aborting.")
-      onDone()
-      return
-    }
+    modelLoads.cleanupModel(
+      context = context,
+      task = task,
+      model = model,
+      instanceToCleanUp = instanceToCleanUp,
+      onDone = onDone,
+    )
+  }
 
-    if (model.instance != null) {
-      model.cleanUpAfterInit = false
-      Log.d(TAG, "Cleaning up model '${model.name}'...")
-      val onDoneFn: () -> Unit = {
-        model.resetInitialization()
-        Log.d(TAG, "Clean up model '${model.name}' done")
-        onDone()
-      }
-      getCustomTaskByTaskId(id = task.id)
-        ?.cleanUpModelFn(
-          context = context,
-          coroutineScope = viewModelScope,
-          model = model,
-          onDone = onDoneFn,
-        )
-    } else {
-      // When model is being initialized and we are trying to clean it up at same time, we mark it
-      // to clean up and it will be cleaned up after initialization is done.
-      if (model.initializing) {
-        Log.d(
-          TAG,
-          "Model '${model.name}' is still initializing.. Will clean up after it is done initializing",
-        )
-        model.cleanUpAfterInit = true
-      }
-      onDone()
-    }
+  /** Model Shelf: the screen of [task] is left (Back): every model of the task is cleaned up. */
+  fun leaveTask(context: Context, task: Task) {
+    modelLoads.leaveTask(context = context, task = task)
   }
 
   fun setDownloadStatus(curModel: Model, status: ModelDownloadStatus) {

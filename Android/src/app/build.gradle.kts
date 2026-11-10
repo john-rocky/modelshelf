@@ -119,6 +119,9 @@ android {
     compose = true
     buildConfig = true
   }
+  // Model Shelf: the JVM tests reach code that logs through android.util.Log and takes a Context it
+  // never reads; the Android stubs return defaults there instead of throwing.
+  testOptions { unitTests.isReturnDefaultValues = true }
   packaging {
     jniLibs {
       pickFirsts.add("**/liblitertlm_jni.so")

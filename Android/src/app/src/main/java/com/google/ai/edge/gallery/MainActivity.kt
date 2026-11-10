@@ -101,6 +101,8 @@ class MainActivity : ComponentActivity(), VirtualDevicePermissionsHost {
         intent.data = link.toUri()
       }
     }
+    // Model Shelf: the link waits here until the screens read it.
+    modelManagerViewModel.linkInbox.offer(intent.data)
 
     fun setContent() {
       if (contentSet) {
@@ -216,6 +218,8 @@ class MainActivity : ComponentActivity(), VirtualDevicePermissionsHost {
         intent.data = link.toUri()
       }
     }
+    // Model Shelf: the link waits here until the screens read it.
+    modelManagerViewModel.linkInbox.offer(intent.data)
   }
 
   override fun onRequestPermissionsResult(

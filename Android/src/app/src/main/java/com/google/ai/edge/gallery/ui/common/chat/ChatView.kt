@@ -93,7 +93,6 @@ import com.google.ai.edge.gallery.ui.common.saveBitmapToMediaStore
 import com.google.ai.edge.gallery.ui.common.shareBitmap
 import com.google.ai.edge.gallery.ui.common.tts.rememberChatTtsController
 import com.google.ai.edge.gallery.ui.modelmanager.ModelManagerViewModel
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
 private const val TAG = "AGChatView"
@@ -170,11 +169,7 @@ fun ChatView(
     navigateUp()
 
     // clean up all models.
-    scope.launch(Dispatchers.Default) {
-      for (model in task.models) {
-        modelManagerViewModel.cleanupModel(context = context, task = task, model = model)
-      }
-    }
+    modelManagerViewModel.leaveTask(context = context, task = task)
   }
 
   // Initialize model when model/download state changes.

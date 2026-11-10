@@ -16,6 +16,7 @@
 
 package com.google.ai.edge.gallery.ui.navigation
 
+import android.content.Context
 import android.net.Uri
 import android.os.Bundle
 import android.util.Log
@@ -100,9 +101,9 @@ import kotlinx.coroutines.launch
 private const val TAG = "AGGalleryNavGraph"
 private const val ROUTE_HOMESCREEN = "homepage"
 private const val ROUTE_MODEL_LIST = "model_list"
-private const val ROUTE_MODEL = "route_model"
+internal const val ROUTE_MODEL = "route_model"
 private const val ROUTE_BENCHMARK = "benchmark"
-private const val ROUTE_MODEL_MANAGER = "model_manager"
+internal const val ROUTE_MODEL_MANAGER = "model_manager"
 private const val ARG_IMPORT_URL = "import_url"
 private const val ROUTE_NOTIFICATIONS = "notifications"
 private const val ENTER_ANIMATION_DURATION_MS = 500
@@ -474,6 +475,7 @@ fun GalleryNavHost(
       },
     ) { backStackEntry ->
       val importUrl = backStackEntry.arguments?.getString(ARG_IMPORT_URL)
+      val managerContext = LocalContext.current
       GlobalModelManager(
         viewModel = modelManagerViewModel,
         tosViewModel = tosViewModel,
@@ -484,7 +486,17 @@ fun GalleryNavHost(
           navController.navigateUp()
         },
         onModelSelected = { task, model ->
-          navController.navigate("$ROUTE_MODEL/${task.id}/${model.name}")
+          openModelFromManager(
+            task = task,
+            model = model,
+            screens =
+              NavLinkScreens(
+                navController = navController,
+                modelManagerViewModel = modelManagerViewModel,
+                context = managerContext,
+                onSentence = {},
+              ),
+          )
         },
         onBenchmarkClicked = { model ->
           firebaseAnalytics?.logEvent(
@@ -556,88 +568,30 @@ fun GalleryNavHost(
     }
   }
   val intentsSeen = newIntents
-  val intent = activity?.intent
-  val data = intent?.data
   // Wait until the model manager has been initialized and the tasks are available.
-  if (data != null && modelManagerUiState.tasks.isNotEmpty()) {
-    intent.data = null
-    val uriStr = data.toString()
-    Log.d(TAG, "navigation link clicked: $data (new intents so far: $intentsSeen)")
-    // 1. Precise model deep links: <DEEP_LINK_SCHEME>://model/<taskId>/<modelName>
-    if (uriStr.startsWith("$DEEP_LINK_SCHEME://model/")) {
-      if (data.pathSegments.size >= 2) {
-        val taskId = data.pathSegments.get(data.pathSegments.size - 2)
-        val modelName = data.pathSegments.last()
-        val queryStr = data.getQueryParameter("query")
-        modelManagerViewModel.getModelByName(name = modelName)?.let { model ->
-          val route =
-            if (!queryStr.isNullOrEmpty()) {
-              "$ROUTE_MODEL/${taskId}/${model.name}?query=${Uri.encode(queryStr)}"
-            } else {
-              "$ROUTE_MODEL/${taskId}/${model.name}"
-            }
-          // Model Shelf: a link to the chat that is open already (no question) leaves it as it is
-          // instead of opening a second copy of it on top.
-          val current = navController.currentBackStackEntry
-          val sameChatOpen =
-            queryStr.isNullOrEmpty() &&
-              current?.destination?.route?.startsWith("$ROUTE_MODEL/") == true &&
-              current.arguments?.getString("taskId") == taskId &&
-              current.arguments?.getString("modelName") == model.name
-          val sentence =
-            if (sameChatOpen) null
-            else LlmChatModelHelper.sentenceInsteadOfLinkedScreen(linkContext, model)
-          if (sameChatOpen) {
-            Log.d(TAG, "The link's chat is open already: $route")
-          } else if (sentence != null) {
-            Log.i(TAG, "The link's screen does not open: $sentence ($route)")
-            SideEffect { linkSentence = sentence }
-          } else {
-            navController.navigate(route)
-          }
-        }
-      } else {
-        Log.e(TAG, "Malformed deep link URI received: $data")
-      }
-    } else if (data.host == "global_model_manager" || data.host == "import") {
-      val route =
-          ROUTE_MODEL_MANAGER
-      navController.navigate(route)
-    } else {
-      // 2. Dynamic task-level deep links: <DEEP_LINK_SCHEME>://<taskId>
-      val host = data.host
-      if (host != null) {
-        val queryStr = data.getQueryParameter("query")
-        val task = modelManagerUiState.tasks.find { it.id == host }
-        if (task != null) {
-          // Pick the first successfully downloaded model or the default active model for this task
-          val defaultModel =
-            task.models.firstOrNull { model ->
-              modelManagerUiState.modelDownloadStatus[model.name]?.status ==
-                ModelDownloadStatusType.SUCCEEDED
-            } ?: task.models.firstOrNull()
-
-          if (defaultModel != null) {
-            val route =
-              if (!queryStr.isNullOrEmpty()) {
-                "$ROUTE_MODEL/${task.id}/${defaultModel.name}?query=${Uri.encode(queryStr)}"
-              } else {
-                "$ROUTE_MODEL/${task.id}/${defaultModel.name}"
-              }
-            val sentence =
-              LlmChatModelHelper.sentenceInsteadOfLinkedScreen(linkContext, defaultModel)
-            if (sentence != null) {
-              Log.i(TAG, "The link's screen does not open: $sentence ($route)")
-              SideEffect { linkSentence = sentence }
-            } else {
-              navController.navigate(route)
-            }
-          } else {
-            Log.e(TAG, "No available model found for task: $host")
-          }
-        }
-      }
-    }
+  val data =
+    if (modelManagerUiState.tasks.isNotEmpty()) modelManagerViewModel.linkInbox.take() else null
+  if (data != null) {
+    activity?.intent?.data = null
+    var sentence: String? = null
+    handleLink(
+      link =
+        LinkParts(
+          text = data.toString(),
+          host = data.host,
+          pathSegments = data.pathSegments,
+          query = if (data.isHierarchical) data.getQueryParameter("query") else null,
+          number = intentsSeen,
+        ),
+      screens =
+        NavLinkScreens(
+          navController = navController,
+          modelManagerViewModel = modelManagerViewModel,
+          context = linkContext,
+          onSentence = { sentence = it },
+        ),
+    )
+    sentence?.let { shown -> SideEffect { linkSentence = shown } }
   }
 }
 
@@ -805,5 +759,73 @@ private fun CustomTaskScreen(
         onNavigateUp()
       },
     )
+  }
+}
+
+/** Model Shelf: the app's screens as a link sees them (see [LinkScreens]). */
+private class NavLinkScreens(
+  private val navController: NavHostController,
+  private val modelManagerViewModel: ModelManagerViewModel,
+  private val context: Context,
+  private val onSentence: (String) -> Unit,
+) : LinkScreens {
+  override val tasks: List<Task>
+    get() = modelManagerViewModel.uiState.value.tasks
+
+  override fun modelByName(name: String): Model? = modelManagerViewModel.getModelByName(name = name)
+
+  override fun downloadSucceeded(model: Model): Boolean =
+    modelManagerViewModel.uiState.value.modelDownloadStatus[model.name]?.status ==
+      ModelDownloadStatusType.SUCCEEDED
+
+  override fun encodeQuery(query: String): String = Uri.encode(query)
+
+  override fun topRoute(): String? = navController.currentBackStackEntry?.destination?.route
+
+  override fun openModelScreen(): OpenModelScreen? {
+    val top = navController.currentBackStackEntry
+    val entry =
+      navController.currentBackStack.value.lastOrNull {
+        it.destination.route?.startsWith("$ROUTE_MODEL/") == true
+      } ?: return null
+    return OpenModelScreen(
+      route = entry.destination.route ?: "",
+      taskId = entry.arguments?.getString("taskId") ?: "",
+      modelName = entry.arguments?.getString("modelName") ?: "",
+      onTop = entry === top,
+    )
+  }
+
+  override fun gate(model: Model): String? =
+    LlmChatModelHelper.sentenceInsteadOfLinkedScreen(context, model)
+
+  override fun endGate() {}
+
+  override fun showSentence(sentence: String) = onSentence(sentence)
+
+  override fun selectModel(model: Model) = modelManagerViewModel.selectModel(model)
+
+  override suspend fun leave(screen: OpenModelScreen) {
+    modelManagerViewModel.getTaskById(screen.taskId)?.let { task ->
+      modelManagerViewModel.leaveTask(context = context, task = task)
+    }
+  }
+
+  override fun navigate(route: String, popUpToRoute: String?) {
+    if (popUpToRoute == null) {
+      navController.navigate(route)
+    } else {
+      navController.navigate(route) { popUpTo(popUpToRoute) { inclusive = true } }
+    }
+  }
+
+  override fun popBackTo(route: String) {
+    navController.popBackStack(route = route, inclusive = false)
+  }
+
+  override fun deliverQuery(taskId: String, modelName: String, query: String) {}
+
+  override fun log(priority: Int, line: String) {
+    Log.println(priority, TAG, line)
   }
 }
