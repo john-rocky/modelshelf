@@ -362,26 +362,14 @@ object LlmChatModelHelper : LlmModelHelper {
   }
 
   /**
-   * Model Shelf: the sentence that a link to a screen of [model] shows over the current screen
-   * instead of opening that screen, or null when the screen opens. A screen opened on top of a chat
-   * gets no engine while a chat engine answers (the slot closes nothing that answers), nor while
-   * the local API holds the model file; and going back from such a screen cleans up the AI Chat
-   * executor's one session, which the chat below would need for its next question. So the link
-   * opens nothing then, and the chat below stays as it is.
-   */
-  fun sentenceInsteadOfLinkedScreen(context: Context, model: Model): String? =
-    when {
-      chatEngines.anyAnswering() -> ANOTHER_CHAT_ANSWERS
-      chatEngines.liveCount > 0 && EngineOwnership.apiHolds(model.getPath(context = context)) ->
-        API_HOLDS_MODEL
-      else -> null
-    }
-
-  /**
-   * Model Shelf: [sentenceInsteadOfLinkedScreen] and, when it is null, a hold on the chat-engine
-   * slot until [releaseLinkedScreenHold], both under the slot's lock: a question sent between the
-   * gate and the switch of screens is not sent (it gets an error), and a question sent before the
-   * gate makes the gate say that a chat answers (D-614 round 10d, review finding 7).
+   * Model Shelf: the sentence that a link (or the model manager) to a screen of [model] shows over
+   * the current screen instead of opening it, or null when the screen opens: a chat engine answers
+   * (the slot closes nothing that answers), or the local API holds the model file while a chat
+   * engine is alive. When null, the chat-engine slot is held until [releaseLinkedScreenHold]; the
+   * check and the hold are one step under the slot's lock: a question sent between the gate and the
+   * switch of screens is not sent (it gets an error), and a question sent before the gate makes the
+   * gate say that a chat answers (D-614 round 10d, review finding 7). It may wait for the lock:
+   * never call it on the main thread.
    */
   fun holdForLinkedScreen(context: Context, model: Model): String? {
     val path = model.getPath(context = context)

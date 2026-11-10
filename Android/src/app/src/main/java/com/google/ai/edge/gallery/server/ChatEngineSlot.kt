@@ -52,7 +52,8 @@ class ChatEngineSlot<K : Any, I : Any>(
   // away while it was made ([screensGone]); and whether a link holds the slot ([hold]).
   private var makingOwner: K? = null
   private var makingGone = false
-  private var held = false
+  // Volatile: [release] runs on the main thread and takes no lock (review finding 11).
+  @Volatile private var held = false
 
   /** What [make] did. */
   sealed interface Result<out K, out I> {
@@ -160,9 +161,9 @@ class ChatEngineSlot<K : Any, I : Any>(
       reason
     }
 
-  /** Model Shelf: ends [hold]. */
+  /** Model Shelf: ends [hold], without waiting for the lock (an engine may be closing under it). */
   fun release() {
-    lock.withLock { held = false }
+    held = false
   }
 
   /** Closes [engine] if it is alive. False when it was closed already, or was never made here. */

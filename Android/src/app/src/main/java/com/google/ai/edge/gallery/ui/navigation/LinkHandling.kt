@@ -21,7 +21,9 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import com.google.ai.edge.gallery.data.DEEP_LINK_SCHEME
 import com.google.ai.edge.gallery.data.Model
 import com.google.ai.edge.gallery.data.Task
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.withContext
 
 /**
  * Model Shelf: a link that reached the app, in the parts the app reads (Android's Uri gives them;
@@ -186,7 +188,9 @@ internal suspend fun openModelScreen(
     screens.log(Log.INFO, "$label: the chat of ${task.id}/${model.name} is open already")
     return
   }
-  val sentence = screens.gate(model)
+  // The gate takes the chat-engine slot's lock, under which an engine may be closing: never on the
+  // main thread (review finding 11).
+  val sentence = withContext(Dispatchers.Default) { screens.gate(model) }
   if (sentence != null) {
     screens.log(Log.INFO, "$label: no screen opens ($sentence)")
     screens.showSentence(sentence)
