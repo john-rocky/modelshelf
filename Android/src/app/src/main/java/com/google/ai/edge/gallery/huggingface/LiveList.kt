@@ -243,7 +243,7 @@ class LiveListClient(private val cacheDir: File) {
 
   /**
    * Loads the shelf. With [networkAllowed] false (the local API) only the copy saved on the device
-   * is read and nothing is fetched or written.
+   * is read and nothing is fetched or saved; the cache folder is still created when it is missing.
    */
   suspend fun load(networkAllowed: Boolean = true): LiveListResult =
     withContext(Dispatchers.IO) {
