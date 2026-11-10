@@ -26,10 +26,17 @@ import com.google.ai.edge.gallery.data.markInitializationStarted
 import com.google.ai.edge.gallery.data.markInitialized
 import com.google.ai.edge.gallery.data.resetInitialization
 import com.google.ai.edge.litertlm.Contents
+import java.util.Collections
+import kotlin.coroutines.resume
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 private const val TAG = "AGModelManagerViewModel"
 
@@ -50,6 +57,9 @@ internal class ModelLoads(
   private val systemPromptOf: suspend (Task) -> String,
   private val onLoaded: (Model) -> Unit,
 ) {
+  /** The clean-ups of the screens being left now (see [leaveTask]). */
+  private val leaving: MutableList<Job> = Collections.synchronizedList(mutableListOf())
+
   fun initializeModel(
     context: Context,
     task: Task,
@@ -59,6 +69,13 @@ internal class ModelLoads(
     onError: (String) -> Unit = {},
   ) {
     scope.launch {
+      // Model Shelf: a load waits until the screens being left have cleaned up their models (D-614
+      // round 10d). A load that came while the engine of the screen left last still closed saw its
+      // model "loaded" and skipped, and the close then left it with no engine and no session (review
+      // finding 2); a load that started while the clean-up loop ran was marked to be cleaned up
+      // after it (finding 4).
+      awaitLeaves()
+
       // Skip if initialized already.
       if (!force && model.initStatusFlow.value is Model.InitializationStatus.Initialized) {
         Log.d(TAG, "Model '${model.name}' has been initialized. Skipping.")
@@ -161,13 +178,49 @@ internal class ModelLoads(
     }
   }
 
-  /** The chat screen of [task] is left (Back): every model of the task is cleaned up. */
-  fun leaveTask(context: Context, task: Task) {
-    // clean up all models.
-    scope.launch(Dispatchers.Default) {
-      for (model in task.models) {
-        cleanupModel(context = context, task = task, model = model)
+  /**
+   * A screen of [task] is left (Back, or a link that replaces it): every model of the task is
+   * cleaned up, one after the other (a task that keeps its models alive keeps them). The job ends
+   * when every clean-up has ended; loads wait for it.
+   */
+  fun leaveTask(context: Context, task: Task): Job {
+    val keepAlive = taskById(task.id)?.keepModelAlive == true
+    val job =
+      scope.launch(Dispatchers.Default, start = CoroutineStart.LAZY) {
+        if (keepAlive) return@launch
+        // clean up all models.
+        for (model in task.models) {
+          val ended =
+            withTimeoutOrNull(LEAVE_CLEANUP_WAIT_MS) {
+              suspendCancellableCoroutine<Unit> { done ->
+                cleanupModel(
+                  context = context,
+                  task = task,
+                  model = model,
+                  onDone = { if (done.isActive) done.resume(Unit) },
+                )
+              }
+            }
+          if (ended == null) {
+            Log.w(TAG, "The clean-up of '${model.name}' did not end in $LEAVE_CLEANUP_WAIT_MS ms")
+          }
+        }
       }
+    leaving.add(job)
+    job.invokeOnCompletion { leaving.remove(job) }
+    job.start()
+    return job
+  }
+
+  private suspend fun awaitLeaves() {
+    while (true) {
+      val jobs = synchronized(leaving) { leaving.toList() }
+      if (jobs.isEmpty()) return
+      jobs.joinAll()
+      synchronized(leaving) { leaving.removeAll(jobs) }
     }
   }
 }
+
+/** Model Shelf: how long a screen's leave waits for one model's clean-up (an engine's close). */
+private const val LEAVE_CLEANUP_WAIT_MS = 15_000L

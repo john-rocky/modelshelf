@@ -1548,10 +1548,12 @@ constructor(
     )
   }
 
-  /** Model Shelf: the screen of [task] is left (Back): every model of the task is cleaned up. */
-  fun leaveTask(context: Context, task: Task) {
+  /**
+   * Model Shelf: a screen of [task] is left (Back, or a link that replaces it): every model of the
+   * task is cleaned up. The job ends when they all are; a load waits for it (D-614 round 10d).
+   */
+  fun leaveTask(context: Context, task: Task): Job =
     modelLoads.leaveTask(context = context, task = task)
-  }
 
   fun setDownloadStatus(curModel: Model, status: ModelDownloadStatus) {
     // A download that ended without an auth error leaves nothing to ask the user about.
