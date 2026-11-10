@@ -43,6 +43,7 @@ import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import io.ktor.server.routing.routing
 import io.ktor.utils.io.ByteWriteChannel
+import io.ktor.utils.io.writeFully
 import io.ktor.utils.io.writeStringUtf8
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicLong
@@ -76,6 +77,7 @@ class ApiServer(
   val catalog = ApiModelCatalog(context)
   val host = ApiEngineHost(context, onStateChanged)
   val asr = ApiAsrHost(context, host, onStateChanged)
+  val tts = ApiTtsHost(context, host, onStateChanged)
   private val requestIds = AtomicLong(0)
   private val bodies = BodyReader()
   @Volatile
@@ -117,11 +119,13 @@ class ApiServer(
       stopping = true
       host.beginShutdown()
       asr.beginShutdown()
+      tts.beginShutdown()
       val s = server
       server = null
       withContext(Dispatchers.IO) { s?.stop(500, 2_000) }
       host.shutdown()
       asr.shutdown()
+      tts.shutdown()
       Log.i(TAG, "Stopped")
     }
 
@@ -154,7 +158,10 @@ class ApiServer(
       }
       get("/api/ps") {
         if (caller(call, openAi = false) == null) return@get
-        call.respondJson(HttpStatusCode.OK, ApiJson.ollamaPs(listOfNotNull(host.loadedInfo())))
+        call.respondJson(
+          HttpStatusCode.OK,
+          ApiJson.ollamaPs(listOfNotNull(host.loadedInfo()), listOfNotNull(asr.loadedInfo(), tts.loadedInfo())),
+        )
       }
       post("/api/chat") { chat(call, Dialect.OLLAMA_CHAT) }
       post("/api/generate") { chat(call, Dialect.OLLAMA_GENERATE) }
@@ -173,8 +180,12 @@ class ApiServer(
         val grant = caller(call, openAi = true) ?: return@get
         val entries = catalog.entries(refresh = true)
         val speech = catalog.asrEntries()
-        log("GET /v1/models from ${grant.packageName}: ${entries.size} chat and ${speech.size} speech models")
-        call.respondJson(HttpStatusCode.OK, ApiJson.openAiModels(entries, speech))
+        val voices = catalog.ttsEntries()
+        log(
+          "GET /v1/models from ${grant.packageName}: ${entries.size} chat, ${speech.size} speech " +
+            "recognition and ${voices.size} text-to-speech models"
+        )
+        call.respondJson(HttpStatusCode.OK, ApiJson.openAiModels(entries, speech, voices))
       }
       post("/v1/chat/completions") { chat(call, Dialect.OPENAI_CHAT) }
       post("/v1/completions") {
@@ -187,9 +198,7 @@ class ApiServer(
         notHere(call, 400, "Embeddings are not supported by this API yet.", openAi = true)
       }
       post("/v1/audio/transcriptions") { transcribe(call) }
-      post("/v1/audio/speech") {
-        notHere(call, 501, "Text to speech is not in this version of Model Shelf yet.", openAi = true)
-      }
+      post("/v1/audio/speech") { speak(call) }
     }
   }
 
@@ -235,7 +244,7 @@ class ApiServer(
     }
     val reuseForTest = BuildConfig.DEBUG && call.request.header(DEBUG_REUSE_HEADER) == "1"
     try {
-      host.withTurn { queueMs ->
+      host.withModelTurn(entry, request.keepAliveMs) { queueMs ->
         val prepared = host.prepare(entry, request, reuseForTest)
         val maxOutput =
           resolveMaxOutputTokens(request.maxOutputTokens, entry.maxOutputTokensMin, prepared.loaded.maxNumTokens)
@@ -273,7 +282,6 @@ class ApiServer(
             "${r.chunks} text pieces, prompt tokens ${promptTokens ?: "?"}" +
             (r.error?.let { "; $it" } ?: "")
         )
-        host.keepAlive(request.keepAliveMs)
       }
     } catch (e: ApiEngineHost.Busy) {
       log("#$id 503 busy, retry after ${e.retryAfterS} s")
@@ -440,6 +448,7 @@ class ApiServer(
             )
           }
       checkTranscriptionLanguage(request.language, entry)
+      val notApplied = transcriptionNotApplied(request, entry)
       val wav =
         try {
           WavReader.read(request.audio.bytes, MAX_AUDIO_SECONDS)
@@ -447,7 +456,7 @@ class ApiServer(
           throw ApiError(400, e.message ?: "The file is not a WAV file Model Shelf can read.")
         }
       val audioMs = (wav.seconds * 1000).toLong()
-      host.withTurn { queueMs ->
+      asr.withModelTurn { queueMs ->
         val loaded = asr.load(entry)
         call.response.header("X-ModelShelf-Backend", loaded.backend)
         call.response.header("X-ModelShelf-Backend-Detail", loaded.backendNote)
@@ -455,8 +464,8 @@ class ApiServer(
         call.response.header("X-ModelShelf-Queue-Ms", queueMs)
         call.response.header("X-ModelShelf-Audio-Ms", audioMs)
         call.response.header("X-ModelShelf-Audio-Source", wav.describeSource())
-        if (request.ignored.isNotEmpty()) {
-          call.response.header("X-ModelShelf-Not-Applied", headerSafe(request.ignored))
+        if (notApplied.isNotEmpty()) {
+          call.response.header("X-ModelShelf-Not-Applied", headerSafe(notApplied))
         }
         log(
           "#$id ${entry.name} on ${loaded.backend.uppercase()} (${loaded.backendNote}): " +
@@ -467,7 +476,6 @@ class ApiServer(
           host.keepingAwake(audioMs + 120_000L) {
             if (request.stream) streamTranscript(call, entry, wav.samples) else wholeTranscript(call, request, entry, wav.samples, audioMs)
           }
-        asr.keepAlive()
         if (result != null) {
           log(
             "#$id ended: inference ${result.inferenceMs} ms for ${"%.2f".format(audioMs / 1000.0)} s " +
@@ -517,7 +525,7 @@ class ApiServer(
       TranscriptFormat.VERBOSE_JSON ->
         call.respondJson(
           HttpStatusCode.OK,
-          AsrJson.verbose(r.text, languageName(entry.languages.firstOrNull()), audioMs / 1000.0, r.pieces),
+          AsrJson.verbose(r.text, transcriptLanguage(request, entry), audioMs / 1000.0, r.pieces),
         )
     }
     return r
@@ -567,6 +575,110 @@ class ApiServer(
     return result
   }
 
+  // ---- Text to speech ------------------------------------------------------------------------
+
+  /**
+   * OpenAI's POST /v1/audio/speech: text in, 24 kHz mono 16-bit speech out, as a WAV file (the
+   * default) or as headerless PCM. The whole audio comes in one response.
+   */
+  private suspend fun speak(call: ApplicationCall) {
+    val arrived = SystemClock.elapsedRealtime()
+    val grant = caller(call, openAi = true) ?: return
+    // A small body (the input is checked as soon as it is parsed): a waiting request holds little.
+    val body = readBodyBytes(call, MAX_SPEECH_BODY_BYTES, openAi = true)?.toString(Charsets.UTF_8) ?: return
+    val id = requestIds.incrementAndGet()
+    try {
+      val request = parseSpeechRequest(body)
+      // The log carries the input's length, not the text.
+      log(
+        "#$id /v1/audio/speech from ${grant.packageName}: model ${request.model}, input " +
+          "${request.inputChars} characters, voice ${request.voice ?: "(the model's default)"}, " +
+          "response_format ${request.format.wire}" +
+          (if (request.ignored.isEmpty()) "" else ", not applied: ${request.ignored.joinToString()}")
+      )
+      val entry =
+        catalog.findTts(request.model)
+          ?: throw when {
+            catalog.findAsr(request.model) != null ->
+              ApiError(
+                400,
+                "\"${request.model}\" is a speech recognition model. Name a text-to-speech model; " +
+                  "GET /v1/models lists them.",
+              )
+            catalog.find(request.model) != null ->
+              ApiError(
+                400,
+                "\"${request.model}\" is a chat model. Name a text-to-speech model; GET /v1/models lists them.",
+              )
+            else ->
+              ApiError(
+                404,
+                "Text-to-speech model \"${request.model}\" is not on this phone; GET /v1/models lists " +
+                  "the models here.",
+                "model_not_found",
+              )
+          }
+      val voice = resolveSpeechVoice(request.voice, entry)
+      tts.withModelTurn { queueMs ->
+        val loaded = tts.load(entry, voice)
+        // The model lists its own voices once loaded: check the voice against that list too.
+        resolveSpeechVoice(voice, entry, loaded.voices)
+        val timeoutS = DEFAULT_REQUEST_TIMEOUT_S
+        log(
+          "#$id ${entry.name} on ${loaded.backend.uppercase()} (${loaded.backendNote}): voice $voice, " +
+            "load ${loaded.loadMs} ms, waited $queueMs ms, time limit $timeoutS s ($APP_DEFAULT_SOURCE)"
+        )
+        val r = host.keepingAwake(timeoutS * 1000L + 60_000L) { tts.synthesize(entry, voice, request.input, timeoutS * 1000L) }
+        // The WAV header, then the engine's pieces as they are: the audio is not copied into one array.
+        val header = if (request.format == SpeechFormat.WAV) WavWriter.header(r.pcmBytes) else ByteArray(0)
+        val length = header.size.toLong() + r.pcmBytes
+        call.response.header("X-ModelShelf-Backend", loaded.backend)
+        call.response.header("X-ModelShelf-Backend-Detail", loaded.backendNote)
+        call.response.header("X-ModelShelf-Load-Ms", loaded.loadMs)
+        call.response.header("X-ModelShelf-Queue-Ms", queueMs)
+        call.response.header("X-ModelShelf-Voice", voice)
+        call.response.header("X-ModelShelf-Audio-Ms", r.audioMs)
+        call.response.header("X-ModelShelf-Inference-Ms", r.synthMs)
+        call.response.header("X-ModelShelf-First-Audio-Ms", r.firstAudioMs)
+        call.response.header("X-ModelShelf-Sample-Rate", SPEECH_OUTPUT_RATE_HZ)
+        if (request.ignored.isNotEmpty()) {
+          call.response.header("X-ModelShelf-Not-Applied", headerSafe(request.ignored))
+        }
+        call.respondBytesWriter(ContentType.parse(request.format.contentType), HttpStatusCode.OK, length) {
+          writeFully(header)
+          for (piece in r.pieces) writeFully(piece)
+        }
+        log(
+          "#$id ended: ${"%.2f".format(r.audioMs / 1000.0)} s of audio in ${r.synthMs} ms " +
+            "(${if (r.synthMs > 0) "%.1f".format(r.audioMs.toDouble() / r.synthMs) else "-"} times real time), " +
+            "first audio ${r.firstAudioMs} ms, ${r.pieces.size} pieces, $length bytes " +
+            "${request.format.wire}, total ${SystemClock.elapsedRealtime() - arrived} ms"
+        )
+      }
+    } catch (e: ApiEngineHost.Busy) {
+      log("#$id 503 busy, retry after ${e.retryAfterS} s")
+      call.response.header(HttpHeaders.RetryAfter, e.retryAfterS)
+      respondError(
+        call,
+        ApiError(503, "Model Shelf is answering other requests. Try again in ${e.retryAfterS} s.", "busy"),
+        openAi = true,
+      )
+    } catch (e: ApiError) {
+      log("#$id ${e.status} ${e.message}")
+      respondError(call, e, openAi = true)
+    } catch (e: CancellationException) {
+      throw e
+    } catch (e: Exception) {
+      if (call.response.isCommitted) {
+        // The audio was being sent: the caller went away, and no error can follow it.
+        log("#$id the audio stopped while it was sent: ${e.message ?: e.javaClass.simpleName}")
+      } else {
+        Log.e(TAG, "#$id The synthesis failed", e)
+        respondError(call, ApiError(500, "The synthesis failed: ${e.message ?: e.javaClass.simpleName}"), openAi = true)
+      }
+    }
+  }
+
   /** Ollama's /api/chat or /api/generate with no message: load, or unload with keep_alive 0. */
   private suspend fun loadOrUnload(
     call: ApplicationCall,
@@ -577,7 +689,7 @@ class ApiServer(
   ) {
     val generate = request.dialect == Dialect.OLLAMA_GENERATE
     try {
-      host.withTurn { queueMs ->
+      host.withModelTurn(entry, request.keepAliveMs) { queueMs ->
         val reason: String
         var loadMs = 0L
         if (request.keepAliveMs == 0L) {
@@ -585,7 +697,6 @@ class ApiServer(
           reason = "unload"
         } else {
           loadMs = host.loadOnly(entry, request.numCtx)
-          host.keepAlive(request.keepAliveMs)
           reason = "load"
         }
         log("#$id ${entry.name}: $reason (${loadMs} ms)")

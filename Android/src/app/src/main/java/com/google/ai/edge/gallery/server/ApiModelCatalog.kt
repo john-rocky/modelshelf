@@ -22,12 +22,15 @@ import android.util.Log
 import com.google.ai.edge.gallery.BuildConfig
 import com.google.ai.edge.gallery.common.getModelStorageDir
 import com.google.ai.edge.gallery.data.AllowedModel
+import com.google.ai.edge.gallery.data.Model
 import com.google.ai.edge.gallery.data.ModelAllowlist
 import com.google.ai.edge.gallery.data.ModelType
 import com.google.ai.edge.gallery.data.RuntimeType
 import com.google.ai.edge.gallery.data.TMP_FILE_EXT
 import com.google.ai.edge.gallery.huggingface.LiveListClient
 import com.google.ai.edge.gallery.huggingface.ShelfApiMeta
+import com.google.ai.edge.gallery.services.tts.MediaPipeTtsModels
+import com.google.ai.edge.gallery.services.tts.TtsModelRegistry
 import com.google.ai.edge.gallery.speech.PhononFiles
 import com.google.gson.Gson
 import java.io.File
@@ -55,31 +58,40 @@ private const val FRESH_FOR_MS = 15_000L
  */
 class ApiModelCatalog(private val context: Context) {
   private val lock = Mutex()
-  private var cached: List<ApiModelEntry> = emptyList()
-  private var asrCached: List<AsrEntry> = emptyList()
+  private var lists = Lists(emptyList(), emptyList(), emptyList())
   private var builtAtMs = 0L
 
+  private class Lists(val llm: List<ApiModelEntry>, val asr: List<AsrEntry>, val tts: List<TtsEntry>)
+
   /** The chat models on this phone, rebuilt when [refresh] or when the last list is old. */
-  suspend fun entries(refresh: Boolean = false): List<ApiModelEntry> = lists(refresh).first
+  suspend fun entries(refresh: Boolean = false): List<ApiModelEntry> = lists(refresh).llm
 
   /** The speech recognition models on this phone, as [entries]. */
-  suspend fun asrEntries(refresh: Boolean = false): List<AsrEntry> = lists(refresh).second
+  suspend fun asrEntries(refresh: Boolean = false): List<AsrEntry> = lists(refresh).asr
 
-  private suspend fun lists(refresh: Boolean): Pair<List<ApiModelEntry>, List<AsrEntry>> =
+  /** The text-to-speech models on this phone, as [entries]. */
+  suspend fun ttsEntries(refresh: Boolean = false): List<TtsEntry> = lists(refresh).tts
+
+  private suspend fun lists(refresh: Boolean): Lists =
     lock.withLock {
       val now = SystemClock.elapsedRealtime()
       if (refresh || builtAtMs == 0L || now - builtAtMs > FRESH_FOR_MS) {
         try {
-          val (llm, asr) = withContext(Dispatchers.IO) { build() }
-          cached = llm
-          asrCached = asr
+          lists = withContext(Dispatchers.IO) { build() }
         } catch (e: Exception) {
           Log.e(TAG, "Could not read the model lists", e)
         }
         builtAtMs = now
       }
-      cached to asrCached
+      lists
     }
+
+  /** The text-to-speech model a request names, or null; a miss reads the lists again once. */
+  suspend fun findTts(requested: String): TtsEntry? {
+    val hit = matchModel(requested, ttsEntries(), { it.name }, { it.name })
+    if (hit != null) return hit
+    return matchModel(requested, ttsEntries(refresh = true), { it.name }, { it.name })
+  }
 
   /** The speech model a request names, or null; a miss reads the lists again once. */
   suspend fun findAsr(requested: String): AsrEntry? {
@@ -95,10 +107,12 @@ class ApiModelCatalog(private val context: Context) {
     return matchModel(requested, entries(refresh = true), { it.name }, { it.repoId })
   }
 
-  private suspend fun build(): Pair<List<ApiModelEntry>, List<AsrEntry>> {
+  private suspend fun build(): Lists {
     val modelsDir = getModelStorageDir(context)
     val out = mutableListOf<ApiModelEntry>()
     val asr = mutableListOf<AsrEntry>()
+    val tts = mutableListOf<TtsEntry>()
+    val ttsModels = mutableListOf<Model>()
     val seenFiles = mutableSetOf<Pair<String, String>>()
 
     // 1. Google's model list, as the app last saved it (the test file first, as the app does).
@@ -125,6 +139,12 @@ class ApiModelCatalog(private val context: Context) {
       val speech = toAsrEntry(allowed, listName)
       if (speech != null) {
         asr.add(speech)
+        continue
+      }
+      val voice = toTtsEntry(allowed, listName)
+      if (voice != null) {
+        tts.add(voice.first)
+        ttsModels.add(voice.second)
         continue
       }
       val entry =
@@ -187,14 +207,69 @@ class ApiModelCatalog(private val context: Context) {
     // Two files may give the same API name (same repo and stem from both lists): keep the first.
     val unique = out.distinctBy { it.name }
     val uniqueAsr = asr.distinctBy { it.name }
+    val uniqueTts = tts.distinctBy { it.name }
+    registerVoiceModels(ttsModels)
     Log.i(
       TAG,
       "Models for the local API: ${unique.size} chat models on this phone " +
         "(${unique.joinToString { it.name }}), ${uniqueAsr.size} speech models " +
-        "(${uniqueAsr.joinToString { it.name }}); lists read: " +
+        "(${uniqueAsr.joinToString { it.name }}), ${uniqueTts.size} text-to-speech models " +
+        "(${uniqueTts.joinToString { it.name }}); lists read: " +
         "${allowlistFile?.name ?: "no Google model list saved"}, shelf ${shelf.source}",
     )
-    return unique to uniqueAsr
+    return Lists(unique, uniqueAsr, uniqueTts)
+  }
+
+  /**
+   * A text-to-speech model of Google's list that the app's MediaPipe TTS engine runs, when its file
+   * is on the phone; with the list's model, which the engine finds the file by.
+   */
+  private fun toTtsEntry(allowed: AllowedModel, listedBy: String): Pair<TtsEntry, Model>? {
+    val model = allowed.toModel() ?: return null
+    if (model.modelType != ModelType.TTS || model.backendSpec.runtimeType != RuntimeType.LITERT_LM) {
+      return null
+    }
+    val profile = model.ttsProfile ?: return null
+    val spec = MediaPipeTtsModels.MODEL_SPECS.firstOrNull { it.engineModelId == profile.engineModelId } ?: return null
+    val path = model.getPath(context)
+    val file = File(path)
+    if (!file.isFile || File("$path.$TMP_FILE_EXT").exists()) return null
+    val expected = model.downloadInfo.sizeInBytes
+    if (expected > 0 && file.length() != expected) {
+      Log.w(TAG, "Skipping ${file.name}: ${file.length()} B on the phone, the list says $expected B")
+      return null
+    }
+    val voices = profile.voices.map { it.id }.ifEmpty { spec.defaultVoiceIds }
+    val default = profile.defaultVoiceId?.takeIf { it in voices } ?: voices.first()
+    return TtsEntry(
+      name = allowed.modelId,
+      engineModelId = profile.engineModelId,
+      path = path,
+      sizeBytes = file.length(),
+      commit = model.downloadInfo.version,
+      voices = listOf(default) + voices.filter { it != default },
+      defaultVoice = default,
+      languages = profile.languages.ifEmpty { spec.defaultLanguages },
+      modifiedMs = file.lastModified(),
+      listedBy = listedBy,
+    ) to model
+  }
+
+  /**
+   * The app's TTS engine finds a model's file through [TtsModelRegistry], which the app fills when
+   * its model list loads. When the local API runs before that (the process started for the connect
+   * screen), the voice models on the phone are added here.
+   */
+  private fun registerVoiceModels(models: List<Model>) {
+    if (models.isEmpty()) return
+    val registered = TtsModelRegistry.registeredAllowlistModels
+    val missing =
+      models.filter { m ->
+        registered.none { it.ttsProfile?.engineModelId == m.ttsProfile?.engineModelId }
+      }
+    if (missing.isEmpty()) return
+    TtsModelRegistry.registerAllowlistModels(registered + missing)
+    Log.i(TAG, "Registered for the voice engine: ${missing.joinToString { it.name }}")
   }
 
   /** A speech model of Google's list (MediaPipe's AudioTranscriber) whose file is on the phone. */

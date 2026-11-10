@@ -126,8 +126,7 @@ private fun LocalApiScreen() {
     }
     if (state.running) {
       Text(
-        state.loadedModel?.let { "Loaded: $it (${state.loadedBackend?.uppercase() ?: "?"})" }
-          ?: "No model loaded",
+        state.loadedLine() ?: "No model loaded",
         style = MaterialTheme.typography.bodyMedium,
       )
       Text("Requests answered or refused: ${state.requests}", style = MaterialTheme.typography.bodySmall)

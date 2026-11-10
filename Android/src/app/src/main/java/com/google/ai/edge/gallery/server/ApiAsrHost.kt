@@ -88,12 +88,29 @@ class ApiAsrHost(
 
   class Result(val pieces: List<TranscriptPiece>, val text: String, val inferenceMs: Long)
 
-  /** The loaded speech model and its backend, for /api/ps-like status lines. */
-  fun loadedInfo(): Pair<AsrEntry, String>? = loaded?.let { it.entry to it.backend }
+  /** The loaded speech model, for /api/ps, the notification and the Local API screen. */
+  fun loadedInfo(): LoadedAudioModel? =
+    loaded?.let {
+      LoadedAudioModel(it.entry.name, "transcription", it.backend, it.entry.sizeBytes, it.entry.commit, it.expiresAtMs)
+    }
 
-  /** Loads [entry] if it is not the loaded model (inside a turn of [turns]). */
+  /**
+   * A turn of [turns] for a request on a speech model. The unload timer stops while [block] runs and
+   * is set again when it ends, whether the request succeeded or failed: the loaded model unloads
+   * [DEFAULT_KEEP_ALIVE_MS] after the last request.
+   */
+  suspend fun <T> withModelTurn(block: suspend (queueMs: Long) -> T): T =
+    turns.withTurn { queueMs ->
+      unloadJob?.cancel()
+      try {
+        block(queueMs)
+      } finally {
+        keepAlive()
+      }
+    }
+
+  /** Loads [entry] if it is not the loaded model (inside [withModelTurn]). */
   suspend fun load(entry: AsrEntry): LoadInfo {
-    unloadJob?.cancel()
     val t0 = SystemClock.elapsedRealtime()
     val l = ensureLoaded(entry)
     return LoadInfo(l.backend, l.backendNote, SystemClock.elapsedRealtime() - t0)
@@ -109,7 +126,6 @@ class ApiAsrHost(
     audio: FloatArray,
     onPiece: (TranscriptPiece) -> Unit,
   ): Result {
-    unloadJob?.cancel()
     val l = ensureLoaded(entry)
     val job = currentCoroutineContext()[Job]
     val stopped = { closing || job?.isActive == false }
@@ -134,7 +150,9 @@ class ApiAsrHost(
   }
 
   /** Unloads the speech model [DEFAULT_KEEP_ALIVE_MS] after the last request (inside a turn). */
-  fun keepAlive() {
+  private fun keepAlive() {
+    unloadJob?.cancel()
+    if (closing) return
     val l = loaded ?: return
     val keep = DEFAULT_KEEP_ALIVE_MS
     l.expiresAtMs = System.currentTimeMillis() + keep

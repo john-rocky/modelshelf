@@ -19,6 +19,7 @@ package com.google.ai.edge.gallery.server
 import com.google.gson.JsonParser
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -159,6 +160,25 @@ class ApiAsrProtocolTest {
     assertEquals("litert-community/Phonon-2.5-English does not transcribe \"ja\"; it takes en.", e.message)
     // A model whose list names no languages is not checked.
     checkTranscriptionLanguage("ja", phonon.copy(languages = emptyList()))
+  }
+
+  @Test
+  fun verboseJsonNamesTheRequestsLanguageOrTheModelsOnlyOne() {
+    // Parakeet TDT v3's list starts with bg-BG: a list's first language is not the audio's.
+    val parakeet =
+      phonon.copy(
+        name = "litert-community/parakeet-tdt-0.6b-v3",
+        kind = AsrKind.MEDIAPIPE,
+        languages = listOf("bg-BG", "cs-CZ", "en-US", "de-DE"),
+      )
+    val plain = parseTranscriptionForm(form("file" to audio, "model" to "m"))
+    val english = parseTranscriptionForm(form("file" to audio, "model" to "m", "language" to "en"))
+    assertNull(transcriptLanguage(plain, parakeet))
+    assertEquals("english", transcriptLanguage(english, parakeet))
+    assertEquals("english", transcriptLanguage(plain, phonon))
+    val v = JsonParser.parseString(AsrJson.verbose("hi", null, 1.0, emptyList())).asJsonObject
+    assertFalse(v.has("language"))
+    assertEquals("hi", v.get("text").asString)
   }
 
   @Test

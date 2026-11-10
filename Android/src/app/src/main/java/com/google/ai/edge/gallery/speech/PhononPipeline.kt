@@ -77,6 +77,8 @@ private constructor(
   private val buckets: List<Bucket>,
   private val decoder: CompiledModel,
   private val tokenizer: TdtTokenizer,
+  /** Every buffer made so far, so a load that fails part way can close them ([loadOn]). */
+  made: MutableList<TensorBuffer>,
 ) : AutoCloseable {
 
   /** Milliseconds the load and the warm-up window took. */
@@ -88,6 +90,7 @@ private constructor(
     val mel: CompiledModel,
     val encoder: CompiledModel,
     val signature: String,
+    made: MutableList<TensorBuffer>,
   ) {
     /** The most valid samples this window length holds: the mel graph's audio length. */
     val numSamples: Int = run {
@@ -95,24 +98,25 @@ private constructor(
       layout?.dimensions?.fold(1) { a, b -> a * b }
         ?: throw IllegalStateException("phonon25en_mel_${name}s.tflite: no audio input size")
     }
-    val melIn = listOf("audio", "n_valid").associateWith { mel.createInputBuffer(it, SERVING) }
-    val melOut = listOf("features", "frame_mask", "mel_mask").associateWith { mel.createOutputBuffer(it, SERVING) }
-    val encIn = listOf("features", "mel_mask").associateWith { encoder.createInputBuffer(it, signature) }
-    val encOut = mapOf("enc" to encoder.createOutputBuffer("enc", signature))
+    val melIn = listOf("audio", "n_valid").associateWith { mel.createInputBuffer(it, SERVING).also { b -> made.add(b) } }
+    val melOut =
+      listOf("features", "frame_mask", "mel_mask").associateWith { mel.createOutputBuffer(it, SERVING).also { b -> made.add(b) } }
+    val encIn = listOf("features", "mel_mask").associateWith { encoder.createInputBuffer(it, signature).also { b -> made.add(b) } }
+    val encOut = mapOf("enc" to encoder.createOutputBuffer("enc", signature).also { b -> made.add(b) })
     val buffers: List<TensorBuffer> = melIn.values + melOut.values + encIn.values + encOut.values
   }
 
   // predict: inputs c, h, token -> outputs c_out, dec_out, h_out; joint: dec_out, enc_frame -> logits.
-  private val tokenBuffer = decoder.createInputBuffer("token", PREDICT)
-  private val decOut = decoder.createOutputBuffer("dec_out", PREDICT)
-  private val encFrame = decoder.createInputBuffer("enc_frame", JOINT)
+  private val tokenBuffer = decoder.createInputBuffer("token", PREDICT).also { b -> made.add(b) }
+  private val decOut = decoder.createOutputBuffer("dec_out", PREDICT).also { b -> made.add(b) }
+  private val encFrame = decoder.createInputBuffer("enc_frame", JOINT).also { b -> made.add(b) }
   private val jointIn = mapOf("dec_out" to decOut, "enc_frame" to encFrame)
-  private val jointOut = mapOf("logits" to decoder.createOutputBuffer("logits", JOINT))
+  private val jointOut = mapOf("logits" to decoder.createOutputBuffer("logits", JOINT).also { b -> made.add(b) })
   // The output states of one predict call are the input states of the next one.
   private val states: List<List<TensorBuffer>> =
     listOf(
-      listOf("c", "h").map { decoder.createInputBuffer(it, PREDICT) },
-      listOf("c_out", "h_out").map { decoder.createOutputBuffer(it, PREDICT) },
+      listOf("c", "h").map { decoder.createInputBuffer(it, PREDICT).also { b -> made.add(b) } },
+      listOf("c_out", "h_out").map { decoder.createOutputBuffer(it, PREDICT).also { b -> made.add(b) } },
     )
   private val predictIn = states.map { (c, h) -> mapOf("c" to c, "h" to h, "token" to tokenBuffer) }
   private val predictOut = states.map { (c, h) -> mapOf("c_out" to c, "dec_out" to decOut, "h_out" to h) }
@@ -274,6 +278,7 @@ private constructor(
         if (backend == PhononFiles.Backend.NPU) Environment.create(BuiltinNpuAcceleratorProvider(context))
         else Environment.create()
       val models = mutableListOf<CompiledModel>()
+      val made = mutableListOf<TensorBuffer>()
       var built: PhononPipeline? = null
       try {
         fun cpu(threads: Int) =
@@ -307,7 +312,7 @@ private constructor(
           }
         val encoder = open(backend.file, encoderOptions)
         val buckets = PhononFiles.WINDOW_NAMES.map { name ->
-          Bucket(name, open(PhononFiles.melFile(name), cpu(2)), encoder, "enc$name")
+          Bucket(name, open(PhononFiles.melFile(name), cpu(2)), encoder, "enc$name", made)
         }
         val decoder = open(PhononFiles.DECODER, cpu(1))
         val note =
@@ -316,7 +321,7 @@ private constructor(
             PhononFiles.Backend.GPU -> "GPU (fp16, shared constants)"
             PhononFiles.Backend.CPU -> "CPU (int8, 4 threads)"
           }
-        val p = PhononPipeline(backend, note, models, env, buckets, decoder, tokenizer)
+        val p = PhononPipeline(backend, note, models, env, buckets, decoder, tokenizer, made)
         built = p
         // A warm-up window: the NPU file loads without its runtime and fails only when it runs,
         // and a broken runtime shows as values that are not numbers.
@@ -329,6 +334,12 @@ private constructor(
         if (b != null) {
           b.close()
         } else {
+          // The load failed part way: close the buffers made so far, then the graphs.
+          made.forEach {
+            try {
+              it.close()
+            } catch (_: Exception) {}
+          }
           models.forEach {
             try {
               it.close()

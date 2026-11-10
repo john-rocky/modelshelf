@@ -38,13 +38,21 @@ data class LocalApiState(
   val stopping: Boolean = false,
   /** Why the last start failed, or null. */
   val error: String? = null,
-  /** The loaded model's API name, or null. */
+  /** The loaded chat model's API name, or null. */
   val loadedModel: String? = null,
   val loadedBackend: String? = null,
+  /** The loaded speech recognition and voice models, as "<name> on <BACKEND>". */
+  val loadedAudio: List<String> = emptyList(),
   val requests: Long = 0,
   /** The last start request the service has handled (see [LocalApi.start]). */
   val handledStart: Long = 0,
-)
+) {
+  /** Every model the API holds, chat model first, as one line; null when none is loaded. */
+  fun loadedLine(): String? {
+    val all = listOfNotNull(loadedModel?.let { "$it on ${loadedBackend?.uppercase() ?: "?"}" }) + loadedAudio
+    return if (all.isEmpty()) null else "Loaded: ${all.joinToString(", ")}"
+  }
+}
 
 /**
  * Model Shelf's local API: HTTP on 127.0.0.1:11434 inside a foreground service, for other apps on
@@ -150,10 +158,12 @@ object LocalApi {
   private fun refresh() {
     val s = server
     val loaded = s?.host?.loadedInfo()
+    val audio = listOfNotNull(s?.asr?.loadedInfo(), s?.tts?.loadedInfo())
     _state.update {
       it.copy(
         loadedModel = loaded?.first?.name,
         loadedBackend = loaded?.third,
+        loadedAudio = audio.map { m -> "${m.name} on ${m.backend.uppercase()}" },
         requests = s?.requestCount ?: it.requests,
       )
     }

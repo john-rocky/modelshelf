@@ -16,6 +16,7 @@
 
 package com.google.ai.edge.gallery.speech
 
+import java.util.Locale
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.ceil
@@ -130,6 +131,14 @@ object WavReader {
         sum += sample(bytes, frameStart + c * bytesPerSample, f.bits, encoding)
       }
       mono[i] = if (f.channels == 1) sum.toFloat() else (sum / f.channels).toFloat()
+      // Float files can hold NaN and infinity: refuse them here (the caller's mistake, a 400) rather
+      // than let the model fail on them.
+      if (!mono[i].isFinite()) {
+        throw WavFormatException(
+          "The WAV file has a sample that is not a finite number (NaN or infinity) at " +
+            String.format(Locale.US, "%.3f", i.toDouble() / f.rateHz) + " s."
+        )
+      }
     }
     val samples = if (f.rateHz == SPEECH_SAMPLE_RATE_HZ) mono else Resampler.resample(mono, f.rateHz, SPEECH_SAMPLE_RATE_HZ)
     return WavAudio(samples, f.rateHz, f.channels, f.bits, encoding)

@@ -19,4 +19,13 @@
   <string name="use_example">Use the example</string>
   <string name="transcribe">Transcribe</string>
   <string name="example_audio">Example: LibriSpeech test-clean 5142-33396-0056, 3.1 s (CC BY 4.0)</string>
+  <string name="tts_title">Text to speech · POST /v1/audio/speech</string>
+  <string name="tts_intro">Type a sentence. A voice model in Model Shelf speaks it, and this phone plays the audio.</string>
+  <string name="tts_model_label">Voice model</string>
+  <string name="tts_model_hint">A text-to-speech model name from Model Shelf</string>
+  <string name="voice_label">Voice (empty = the model\'s default)</string>
+  <string name="voice_hint">For example af_heart</string>
+  <string name="say_label">Text to speak</string>
+  <string name="say_default">Hello from the voice model on this phone. It needs no network.</string>
+  <string name="speak">Speak</string>
 </resources>

@@ -23,6 +23,10 @@ package com.google.ai.edge.gallery.server
  * or could not be made, so the check and the mark are one step: two loads of one file cannot both
  * pass the check. The local API reserves with its engine host as the owner; a host only gives back
  * its own reservation, so a host that is shutting down cannot clear the mark of the next one.
+ *
+ * Text to speech goes the other way, to the same end: the app's read-aloud and the local API use one
+ * shared engine, so there is one engine per voice model file without a reservation (see the last
+ * section).
  */
 object EngineOwnership {
   /** Files the local API has reserved, with the engine host that holds each. */
@@ -64,5 +68,35 @@ object EngineOwnership {
   @Synchronized
   fun releaseForChat(modelName: String) {
     chatFiles.remove(modelName)
+  }
+
+  // ---- Text to speech ----------------------------------------------------------------------------
+  // The app's read-aloud and the local API share one MediaPipe TTS engine (the app's singleton
+  // MediaPipeTtsEngine): it holds one voice model at a time and runs one synthesis at a time, so a
+  // voice model file is never loaded twice and nothing has to be reserved. What is decided here is
+  // when the local API may unload that shared model: only when nobody used the engine after the
+  // API's own last call (the engine counts every prepare and synthesis of every user). When the app
+  // stops or releases the engine during an API request, the request ends with a 503 and the app
+  // keeps the engine.
+
+  /** The engine's use count right after the local API's last call, or null when the API holds nothing. */
+  private var apiTtsMark: Long? = null
+
+  /** The local API finished a call on the shared TTS engine; [useCount] is the engine's count after it. */
+  @Synchronized
+  fun noteApiTtsUse(useCount: Long) {
+    apiTtsMark = useCount
+  }
+
+  /**
+   * Whether the local API may unload the shared TTS model now: the API used it last ([useCount] is
+   * still the count the API noted). Clears the API's mark either way: after this, the model is the
+   * app's to keep or unload.
+   */
+  @Synchronized
+  fun apiMayUnloadTts(useCount: Long): Boolean {
+    val mark = apiTtsMark
+    apiTtsMark = null
+    return mark != null && mark == useCount
   }
 }

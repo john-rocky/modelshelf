@@ -159,8 +159,7 @@ class ApiServerService : Service() {
         if (state.stopping) {
           "Stopping: the answer that runs ends, then the model unloads"
         } else {
-          state.loadedModel?.let { "$it loaded (${state.loadedBackend?.uppercase() ?: "?"})" }
-            ?: "No model loaded"
+          state.loadedLine() ?: "No model loaded"
         }
       return NotificationCompat.Builder(context, CHANNEL_ID)
         .setSmallIcon(android.R.drawable.ic_dialog_info)

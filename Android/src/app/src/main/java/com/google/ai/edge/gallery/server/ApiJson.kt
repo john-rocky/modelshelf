@@ -207,7 +207,11 @@ object ApiJson {
       .toString()
   }
 
-  fun ollamaPs(loaded: List<Triple<ApiModelEntry, Long, String>>): String =
+  /** Ollama's /api/ps: the chat model, then the speech models ([audio]) the API holds. */
+  fun ollamaPs(
+    loaded: List<Triple<ApiModelEntry, Long, String>>,
+    audio: List<LoadedAudioModel> = emptyList(),
+  ): String =
     JsonObject()
       .apply {
         add(
@@ -228,6 +232,32 @@ object ApiJson {
                   addProperty("size_vram", 0)
                   addProperty("context_length", e.maxNumTokens)
                   add("modelshelf", JsonObject().apply { addProperty("backend", backend) })
+                }
+              )
+            }
+            for (m in audio) {
+              add(
+                JsonObject().apply {
+                  addProperty("name", m.name)
+                  addProperty("model", m.name)
+                  addProperty("size", m.sizeBytes)
+                  addProperty("digest", m.commit)
+                  add(
+                    "details",
+                    JsonObject().apply { addProperty("family", m.name.substringAfter('/')) },
+                  )
+                  addProperty(
+                    "expires_at",
+                    if (m.expiresAtMs == Long.MAX_VALUE) FOREVER else isoOf(m.expiresAtMs),
+                  )
+                  addProperty("size_vram", 0)
+                  add(
+                    "modelshelf",
+                    JsonObject().apply {
+                      addProperty("backend", m.backend)
+                      addProperty("kind", m.kind)
+                    },
+                  )
                 }
               )
             }
@@ -300,7 +330,11 @@ object ApiJson {
    * GET /v1/models: the chat models, then the speech models; each says which kind it is under
    * "modelshelf" (OpenAI's list has no field for it).
    */
-  fun openAiModels(entries: List<ApiModelEntry>, asr: List<AsrEntry> = emptyList()): String =
+  fun openAiModels(
+    entries: List<ApiModelEntry>,
+    asr: List<AsrEntry> = emptyList(),
+    tts: List<TtsEntry> = emptyList(),
+  ): String =
     JsonObject()
       .apply {
         addProperty("object", "list")
@@ -338,6 +372,7 @@ object ApiJson {
                 }
               )
             }
+            for (e in tts) add(TtsJson.model(e))
           },
         )
       }

@@ -26,6 +26,8 @@ import android.os.ParcelFileDescriptor
 import android.util.Log
 import androidx.annotation.VisibleForTesting
 import androidx.core.content.ContextCompat
+import com.google.ai.edge.gallery.speech.VoiceInputFixture
+import com.google.ai.edge.gallery.speech.VoiceLevelMeter
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.max
@@ -70,10 +72,13 @@ internal class PcmAudioRecorder(
     onAmplitude: (Float) -> Unit,
     externalAudioSource: (() -> ParcelFileDescriptor?)? = null,
   ) {
+    // Model Shelf: in debug builds a WAV file in the app's folder can stand in for the microphone.
+    val fixtureSource = if (externalAudioSource == null) VoiceInputFixture.sourceOrNull(context) else null
+    val source = externalAudioSource ?: fixtureSource
     val externalPfd =
-      if (externalAudioSource != null) {
+      if (source != null) {
         try {
-          externalAudioSource.invoke()
+          source.invoke()
         } catch (e: CancellationException) {
           audioChannel.close()
           throw e
@@ -86,12 +91,18 @@ internal class PcmAudioRecorder(
         null
       }
     if (externalPfd != null) {
-      streamFromExternalPfd(
-        externalPfd = externalPfd,
-        audioChannel = audioChannel,
-        isStopped = isStopped,
-        onAmplitude = onAmplitude,
-      )
+      val meter = VoiceLevelMeter(if (fixtureSource != null) "debug file" else "external source")
+      try {
+        streamFromExternalPfd(
+          externalPfd = externalPfd,
+          audioChannel = audioChannel,
+          isStopped = isStopped,
+          onAmplitude = onAmplitude,
+          meter = meter,
+        )
+      } finally {
+        meter.finish()
+      }
       return
     }
 
@@ -122,6 +133,8 @@ internal class PcmAudioRecorder(
       return
     }
 
+    // Model Shelf: the microphone's level in dBFS, one log line per second (numbers only).
+    val meter = VoiceLevelMeter("microphone", sampleRateHz)
     var record: AudioRecord? = null
     try {
       if (isStopped()) return
@@ -159,6 +172,7 @@ internal class PcmAudioRecorder(
           } else {
             floatBuffer.copyOf(readCount)
           }
+        meter.add(samples)
         onAmplitude(samples.calculateNormalizedVolume())
         val unused = audioChannel.trySend(samples)
       }
@@ -170,6 +184,7 @@ internal class PcmAudioRecorder(
       Log.e(TAG, "AudioRecord capture failed", e)
       throw AsrServiceError.AudioRecordingFailed(e)
     } finally {
+      meter.finish()
       if (record != null && audioRecordRef.compareAndSet(record, null)) {
         stopAndRelease(record)
       }
@@ -182,6 +197,7 @@ internal class PcmAudioRecorder(
     audioChannel: SendChannel<FloatArray>,
     isStopped: () -> Boolean,
     onAmplitude: (Float) -> Unit,
+    meter: VoiceLevelMeter? = null,
   ) {
     externalPfdRef.getAndSet(externalPfd)?.let { stale -> runCatching { stale.close() } }
     try {
@@ -221,6 +237,7 @@ internal class PcmAudioRecorder(
               val hi = byteBuffer[i * 2 + 1].toInt()
               ((hi shl 8) or lo).toShort() / SHORT_NORMALIZATION_DIVISOR
             }
+          meter?.add(samples)
           onAmplitude(samples.calculateNormalizedVolume())
           val unused = audioChannel.trySend(samples)
         }

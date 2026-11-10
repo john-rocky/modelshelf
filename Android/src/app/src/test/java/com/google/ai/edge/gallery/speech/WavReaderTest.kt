@@ -143,6 +143,18 @@ class WavReaderTest {
   }
 
   @Test
+  fun floatSamplesThatAreNotNumbersAreRefusedInOneSentence() {
+    for ((bits, bad) in listOf(32 to Double.NaN, 32 to Double.POSITIVE_INFINITY, 64 to Double.NEGATIVE_INFINITY)) {
+      try {
+        WavReader.read(wav(16_000, 1, bits, 3, listOf(0.0, 0.5, bad, 0.0)))
+        fail("expected a WavFormatException for $bad in $bits-bit float")
+      } catch (e: WavFormatException) {
+        assertEquals("The WAV file has a sample that is not a finite number (NaN or infinity) at 0.000 s.", e.message)
+      }
+    }
+  }
+
+  @Test
   fun unsupportedEncodingsAreRefused() {
     try {
       WavReader.read(wav(16_000, 1, 16, 6, listOf(0.0))) // A-law

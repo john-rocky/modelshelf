@@ -105,6 +105,8 @@ class ApiEngineHost(private val context: Context, private val onStateChanged: ()
     var engineUsed = false
     /** Wall-clock time the model unloads at; Long.MAX_VALUE = never. */
     var expiresAtMs = Long.MAX_VALUE
+    /** The keep_alive that set [expiresAtMs], for the log. */
+    var keepMs = 0L
   }
 
   /** The queue is full. */
@@ -168,24 +170,49 @@ class ApiEngineHost(private val context: Context, private val onStateChanged: ()
     }
   }
 
-  /** Loads [entry] (inside [withTurn]) without answering: Ollama's empty /api/chat. */
+  /**
+   * A turn ([withTurn]) for a request that names the chat model [entry]. The unload timer stops
+   * while [block] runs and is set again when it ends, whether the request succeeded or failed: the
+   * loaded model gets the request's keep_alive when it is [entry], else it keeps the time it had (a
+   * request refused before it loaded anything leaves the loaded model as it was).
+   */
+  suspend fun <T> withModelTurn(
+    entry: ApiModelEntry,
+    keepAliveMs: Long?,
+    block: suspend (queueMs: Long) -> T,
+  ): T =
+    withTurn { queueMs ->
+      unloadJob?.cancel()
+      try {
+        block(queueMs)
+      } finally {
+        withContext(NonCancellable) {
+          val l = loaded
+          when {
+            l == null -> {}
+            l.entry.path == entry.path -> keepAlive(l, keepAliveMs)
+            else -> armUnloadTimer(l)
+          }
+        }
+      }
+    }
+
+  /** Loads [entry] (inside [withModelTurn]) without answering: Ollama's empty /api/chat. */
   suspend fun loadOnly(entry: ApiModelEntry, numCtx: Int?): Long {
-    unloadJob?.cancel()
     val t0 = SystemClock.elapsedRealtime()
     ensureLoaded(entry, numCtx)
     return SystemClock.elapsedRealtime() - t0
   }
 
   /**
-   * Gets the engine and conversation for [request] (inside [withTurn]). [reuseEngineForTest] keeps
-   * the engine of a stateful model (debug builds only), to show what the restart prevents.
+   * Gets the engine and conversation for [request] (inside [withModelTurn]). [reuseEngineForTest]
+   * keeps the engine of a stateful model (debug builds only), to show what the restart prevents.
    */
   suspend fun prepare(
     entry: ApiModelEntry,
     request: ApiRequest,
     reuseEngineForTest: Boolean,
   ): Prepared {
-    unloadJob?.cancel()
     val t0 = SystemClock.elapsedRealtime()
     val l = ensureLoaded(entry, request.numCtx)
     val npu = l.backend == "npu" || l.backend == "tpu"
@@ -335,27 +362,35 @@ class ApiEngineHost(private val context: Context, private val onStateChanged: ()
       if (before != null && after != null) (after - before - chunks).takeIf { it >= 0 } else null
     }
 
-  /** Sets when the model unloads after this request (inside [withTurn]). */
-  suspend fun keepAlive(keepAliveMs: Long?) {
-    val l = loaded ?: return
+  /** Sets when [l] unloads after a request that named it (inside [withModelTurn]). */
+  private suspend fun keepAlive(l: Loaded, keepAliveMs: Long?) {
     val keep = keepAliveMs ?: DEFAULT_KEEP_ALIVE_MS
     when {
       keep == 0L -> unloadLocked("keep_alive 0")
       keep < 0 -> l.expiresAtMs = Long.MAX_VALUE
       else -> {
         l.expiresAtMs = System.currentTimeMillis() + keep
-        unloadJob =
-          scope.launch {
-            delay(keep)
-            turnLock.withLock {
-              if (loaded === l && System.currentTimeMillis() >= l.expiresAtMs) {
-                unloadLocked("keep_alive of ${keep / 1000} s ended")
-              }
-            }
-          }
+        l.keepMs = keep
+        armUnloadTimer(l)
       }
     }
     onStateChanged()
+  }
+
+  /** Starts the timer that unloads [l] at its [Loaded.expiresAtMs]; none when it never expires. */
+  private fun armUnloadTimer(l: Loaded) {
+    unloadJob?.cancel()
+    if (closing || l.expiresAtMs == Long.MAX_VALUE) return
+    val wait = (l.expiresAtMs - System.currentTimeMillis()).coerceAtLeast(0L)
+    unloadJob =
+      scope.launch {
+        delay(wait)
+        turnLock.withLock {
+          if (loaded === l && System.currentTimeMillis() >= l.expiresAtMs) {
+            unloadLocked("keep_alive of ${l.keepMs / 1000} s ended")
+          }
+        }
+      }
   }
 
   /** Unloads the model at [path] if it is the loaded one (inside [withTurn]). */

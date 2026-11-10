@@ -20,6 +20,10 @@ import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.SharedPreferences
+import android.content.pm.ApplicationInfo
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioTrack
 import android.net.Uri
 import android.os.Bundle
 import android.os.SystemClock
@@ -47,10 +51,13 @@ import org.json.JSONObject
 /**
  * An app with no model of its own. It gets answers from the models on this phone through Model
  * Shelf's local API: Ollama's form (POST /api/chat) and OpenAI's form (POST /v1/chat/completions),
- * both streamed, and the text of a WAV file (POST /v1/audio/transcriptions).
+ * both streamed, the text of a WAV file (POST /v1/audio/transcriptions), and speech for a text it
+ * plays (POST /v1/audio/speech).
  *
  * Started with the extra [EXTRA_HARNESS_DIR], it runs a transcription test through the same request
- * code as the Transcribe button (see [startHarness] and the README).
+ * code as the Transcribe button (see [startHarness] and the README); with [EXTRA_SPEECH_HARNESS_DIR],
+ * a text-to-speech test and its round trip through the code of the Speak and Transcribe buttons
+ * (see [startSpeechHarness]).
  */
 class MainActivity : Activity() {
 
@@ -89,6 +96,19 @@ class MainActivity : Activity() {
   /** The audio to send: its file name and bytes. */
   private class Audio(val name: String, val bytes: ByteArray)
 
+  /** What one speech request did. */
+  private class Speech {
+    var status = -1
+    /** The response body: a WAV file or headerless PCM. */
+    var bytes = ByteArray(0)
+    var totalMs = 0L
+    var refused = false
+    var error: String? = null
+    var retryAfter: String? = null
+    /** Model Shelf's X-ModelShelf-* headers, by the rest of their name in lower case. */
+    val shelf = mutableMapOf<String, String>()
+  }
+
   private lateinit var prefs: SharedPreferences
   private lateinit var connection: TextView
   private lateinit var modelField: EditText
@@ -100,10 +120,17 @@ class MainActivity : Activity() {
   private lateinit var transcribeButton: Button
   private lateinit var transcribeStatus: TextView
   private lateinit var transcriptView: TextView
+  private lateinit var ttsModelField: EditText
+  private lateinit var voiceField: EditText
+  private lateinit var sayField: EditText
+  private lateinit var speakButton: Button
+  private lateinit var speakStatus: TextView
   /** The audio the Transcribe button sends (UI thread only). */
   private var audio: Audio? = null
-  /** True while the test harness runs (UI thread only). */
+  /** True while a test harness runs (UI thread only). */
   private var harnessRunning = false
+  /** The track that plays the last speech; replaced by the next Speak. */
+  @Volatile private var track: AudioTrack? = null
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
@@ -134,22 +161,41 @@ class MainActivity : Activity() {
     transcribeButton = findViewById(R.id.transcribe)
     transcribeStatus = findViewById(R.id.transcribe_status)
     transcriptView = findViewById(R.id.transcript)
+    ttsModelField = findViewById(R.id.tts_model)
+    voiceField = findViewById(R.id.voice)
+    sayField = findViewById(R.id.say_text)
+    speakButton = findViewById(R.id.speak)
+    speakStatus = findViewById(R.id.speak_status)
     findViewById<Button>(R.id.connect).setOnClickListener { connect() }
     for ((api, pane) in panes) pane.button.setOnClickListener { ask(api) }
     findViewById<Button>(R.id.pick_wav).setOnClickListener { pickAudio() }
     findViewById<Button>(R.id.use_example).setOnClickListener { useExample() }
     transcribeButton.setOnClickListener { transcribeAudio() }
+    speakButton.setOnClickListener { speakText() }
     modelField.setText(prefs.getString(KEY_MODEL, ""))
     speechModelField.setText(prefs.getString(KEY_SPEECH_MODEL, ""))
+    ttsModelField.setText(prefs.getString(KEY_TTS_MODEL, ""))
+    voiceField.setText(prefs.getString(KEY_VOICE, ""))
     showConnection()
     loadModels()
-    if (savedInstanceState == null) startHarness(intent)
+    if (savedInstanceState == null) startHarnesses(intent)
   }
 
   override fun onNewIntent(intent: Intent) {
     super.onNewIntent(intent)
     setIntent(intent)
+    startHarnesses(intent)
+  }
+
+  override fun onDestroy() {
+    track?.let { t -> runCatching { t.stop() }; t.release() }
+    track = null
+    super.onDestroy()
+  }
+
+  private fun startHarnesses(intent: Intent?) {
     startHarness(intent)
+    startSpeechHarness(intent)
   }
 
   private fun baseUrl(): String? = prefs.getString(KEY_BASE_URL, null)
@@ -210,7 +256,7 @@ class MainActivity : Activity() {
   /**
    * Fills the model fields from Model Shelf's lists when they are empty: GET /api/tags for the chat
    * models and GET /v1/models for the speech models (the entries whose "modelshelf" says
-   * "kind": "transcription").
+   * "kind": "transcription") and the voice models ("kind": "speech", with their default voice).
    */
   private fun loadModels() {
     val baseUrl = baseUrl() ?: return
@@ -224,16 +270,31 @@ class MainActivity : Activity() {
                 .mapNotNull { models.optJSONObject(it)?.optString("name") }
                 .filter { it.isNotEmpty() }
             }
-          val speech =
+          val v1 =
             getJson(baseUrl, token, "/v1/models")?.let { list ->
               val data = list.optJSONArray("data") ?: JSONArray()
-              (0 until data.length())
-                .mapNotNull { data.optJSONObject(it) }
-                .filter { it.optJSONObject("modelshelf")?.optString("kind") == "transcription" }
-                .map { it.optString("id") }
-                .filter { it.isNotEmpty() }
+              (0 until data.length()).mapNotNull { data.optJSONObject(it) }
             }
-          Log.i(TAG, "models: chat $chat, speech $speech")
+          fun kind(m: JSONObject) = m.optJSONObject("modelshelf")?.optString("kind")
+          val speech = v1?.filter { kind(it) == "transcription" }?.map { it.optString("id") }?.filter { it.isNotEmpty() }
+          val voices = v1?.filter { kind(it) == "speech" && it.optString("id").isNotEmpty() }
+          Log.i(TAG, "models: chat $chat, speech $speech, voice ${voices?.map { it.optString("id") }}")
+          runOnUiThread {
+            if (voices != null) {
+              val first = voices.firstOrNull()
+              if (ttsModelField.text.isBlank() && first != null) {
+                ttsModelField.setText(first.optString("id"))
+                if (voiceField.text.isBlank()) {
+                  voiceField.setText(first.optJSONObject("modelshelf")?.optString("default_voice").orEmpty())
+                }
+              }
+              if (speakStatus.text.isEmpty()) {
+                speakStatus.text =
+                  if (voices.isEmpty()) "Model Shelf has no voice model yet."
+                  else "Voice models in Model Shelf: " + voices.joinToString(", ") { it.optString("id") }
+              }
+            }
+          }
           runOnUiThread {
             if (chat != null) {
               if (modelField.text.isBlank() && chat.isNotEmpty()) modelField.setText(chat.first())
@@ -671,6 +732,212 @@ class MainActivity : Activity() {
     }
   }
 
+  // ---- Text to speech ---------------------------------------------------------------------------
+
+  private fun speakText() {
+    val baseUrl = baseUrl()
+    val token = token()
+    if (baseUrl == null || token == null) {
+      speakStatus.text = "Tap Connect to Model Shelf first."
+      return
+    }
+    val model = ttsModelField.text.toString().trim()
+    val voice = voiceField.text.toString().trim()
+    val text = sayField.text.toString().trim()
+    if (model.isEmpty() || text.isEmpty()) {
+      speakStatus.text = if (model.isEmpty()) "Type a voice model name." else "Type something to speak."
+      return
+    }
+    prefs.edit().putString(KEY_TTS_MODEL, model).putString(KEY_VOICE, voice).apply()
+    speakButton.isEnabled = false
+    speakStatus.text = "Speaking in Model Shelf…"
+    Thread(
+        {
+          val out = synthesize(baseUrl, token, model, voice.ifEmpty { null }, text, FORMAT_WAV)
+          val line = if (out.status == HttpURLConnection.HTTP_OK) speechLine(out) else null
+          runOnUiThread { showSpeech(out, if (line != null) "$line · playing…" else null) }
+          if (line != null) {
+            val played = play(out.bytes)
+            runOnUiThread {
+              speakButton.isEnabled = !harnessRunning
+              speakStatus.text = "$line · $played"
+            }
+          }
+        },
+        "speak",
+      )
+      .start()
+  }
+
+  /**
+   * Sends one speech request (POST /v1/audio/speech) with [format] wav or pcm and reads the whole
+   * body. Runs on a worker thread. The Speak button and the test harness both send through here.
+   * [voice] null = the model's default voice.
+   */
+  private fun synthesize(baseUrl: String, token: String, model: String, voice: String?, text: String, format: String): Speech {
+    val out = Speech()
+    val start = SystemClock.elapsedRealtime()
+    // The log carries the text's length, not the text.
+    Log.i(TAG, "speak: POST $baseUrl$SPEECH model=$model, voice=${voice ?: "(default)"}, $format, text ${text.length} chars")
+    var conn: HttpURLConnection? = null
+    try {
+      val body = JSONObject().put("model", model).put("input", text).put("response_format", format)
+      if (voice != null) body.put("voice", voice)
+      val bytes = body.toString().toByteArray(Charsets.UTF_8)
+      conn = URL(baseUrl + SPEECH).openConnection() as HttpURLConnection
+      conn.requestMethod = "POST"
+      conn.connectTimeout = 5_000
+      // Model Shelf may first load the model, or wait for another app's request to finish.
+      conn.readTimeout = 400_000
+      conn.doOutput = true
+      conn.setFixedLengthStreamingMode(bytes.size)
+      conn.setRequestProperty("Authorization", "Bearer $token")
+      conn.setRequestProperty("Content-Type", "application/json")
+      conn.outputStream.use { it.write(bytes) }
+      out.status = conn.responseCode
+      for ((key, values) in conn.headerFields) {
+        if (key != null && key.startsWith(SHELF_HEADER, ignoreCase = true)) {
+          out.shelf[key.substring(SHELF_HEADER.length).lowercase(Locale.US)] = values.joinToString(",")
+        }
+      }
+      if (out.status != HttpURLConnection.HTTP_OK) {
+        out.retryAfter = conn.getHeaderField("Retry-After")
+        out.error = errorText(conn.errorStream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty())
+        return out
+      }
+      out.bytes = conn.inputStream.use { it.readBytes() }
+    } catch (e: ConnectException) {
+      out.refused = true
+      out.error = API_OFF
+    } catch (e: SocketTimeoutException) {
+      out.error = "No answer in time (${e.message})."
+    } catch (e: IOException) {
+      out.error = "The connection failed: ${e.javaClass.simpleName}: ${e.message}"
+    } catch (e: Exception) {
+      out.error = "Unexpected: ${e.javaClass.simpleName}: ${e.message}"
+    } finally {
+      conn?.disconnect()
+      out.totalMs = SystemClock.elapsedRealtime() - start
+      Log.i(
+        TAG,
+        "speak: end: HTTP ${out.status}, total ${out.totalMs} ms, ${out.bytes.size} bytes, " +
+          "model shelf ${out.shelf}, error ${out.error}",
+      )
+    }
+    return out
+  }
+
+  /** HTTP 200 · GPU · voice af_heart · audio 3.21 s · synthesis 0.45 s (7.1× real time) · total 0.62 s */
+  private fun speechLine(out: Speech): String {
+    val audioMs = out.shelf["audio-ms"]?.toLongOrNull()
+    val synthMs = out.shelf["inference-ms"]?.toLongOrNull()
+    return buildString {
+      append("HTTP 200")
+      out.shelf["backend"]?.let { append(" · ").append(it.uppercase(Locale.US)) }
+      out.shelf["voice"]?.let { append(" · voice ").append(it) }
+      if (audioMs != null) append(" · audio ").append(seconds(audioMs))
+      if (synthMs != null) {
+        append(" · synthesis ").append(seconds(synthMs))
+        if (audioMs != null && synthMs > 0) {
+          append(String.format(Locale.US, " (%.1f× real time)", audioMs.toDouble() / synthMs))
+        }
+      }
+      append(" · total ").append(seconds(out.totalMs))
+    }
+  }
+
+  private fun showSpeech(out: Speech, line: String?) {
+    speakButton.isEnabled = !harnessRunning && line == null
+    speakStatus.text =
+      when {
+        line != null -> line
+        out.refused -> out.error
+        out.status == HttpURLConnection.HTTP_UNAUTHORIZED -> TOKEN_REFUSED
+        out.status > 0 -> "HTTP ${out.status} · ${out.error}"
+        else -> out.error
+      }
+    when {
+      out.refused -> showConnection("Model Shelf's local API is off.")
+      out.status == HttpURLConnection.HTTP_UNAUTHORIZED -> forgetToken()
+    }
+  }
+
+  /**
+   * Plays a WAV body of 24 kHz mono 16-bit PCM to its end on the media stream. Runs on a worker
+   * thread. Returns what happened, for the status line.
+   */
+  private fun play(wav: ByteArray): String {
+    val pcm = wavData(wav) ?: return "not played: the answer is not a 16-bit mono WAV file"
+    if (pcm.bytes.isEmpty()) return "not played: no audio"
+    track?.let { old -> runCatching { old.stop() }; old.release() }
+    val t =
+      try {
+        AudioTrack.Builder()
+          .setAudioAttributes(
+            AudioAttributes.Builder()
+              .setUsage(AudioAttributes.USAGE_MEDIA)
+              .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+              .build()
+          )
+          .setAudioFormat(
+            AudioFormat.Builder()
+              .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+              .setSampleRate(pcm.rateHz)
+              .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+              .build()
+          )
+          .setTransferMode(AudioTrack.MODE_STATIC)
+          .setBufferSizeInBytes(pcm.bytes.size)
+          .build()
+      } catch (e: Exception) {
+        // A static track holds the whole audio: a very long answer may not fit.
+        return "not played: ${e.message ?: e.javaClass.simpleName}"
+      }
+    track = t
+    val frames = pcm.bytes.size / 2
+    t.write(pcm.bytes, 0, pcm.bytes.size)
+    Log.i(TAG, "speak: playing ${frames} frames at ${pcm.rateHz} Hz")
+    t.play()
+    val deadline = SystemClock.elapsedRealtime() + frames * 1000L / pcm.rateHz + 2_000
+    while (t.playbackHeadPosition < frames && SystemClock.elapsedRealtime() < deadline && track === t) {
+      SystemClock.sleep(50)
+    }
+    val done = t.playbackHeadPosition >= frames
+    Log.i(TAG, "speak: played ${t.playbackHeadPosition} of $frames frames")
+    return if (done) "played" else "stopped"
+  }
+
+  private class Pcm(val bytes: ByteArray, val rateHz: Int)
+
+  /** The samples of a 16-bit mono PCM WAV file, or null when it is not one. */
+  private fun wavData(wav: ByteArray): Pcm? {
+    fun tag(at: Int, s: String) = at + 4 <= wav.size && String(wav, at, 4, Charsets.US_ASCII) == s
+    fun u16(at: Int) = (wav[at].toInt() and 0xFF) or ((wav[at + 1].toInt() and 0xFF) shl 8)
+    fun u32(at: Int) = u16(at) or (u16(at + 2) shl 16)
+    if (wav.size < 12 || !tag(0, "RIFF") || !tag(8, "WAVE")) return null
+    var at = 12
+    var rate = 0
+    var ok = false
+    while (at + 8 <= wav.size) {
+      val size = u32(at + 4)
+      if (size < 0) return null
+      val body = at + 8
+      if (tag(at, "fmt ") && body + 16 <= wav.size) {
+        ok = u16(body) == 1 && u16(body + 2) == 1 && u16(body + 14) == 16
+        rate = u32(body + 4)
+      } else if (tag(at, "data")) {
+        if (!ok || rate <= 0) return null
+        val end = minOf(wav.size.toLong(), body.toLong() + size).toInt()
+        return Pcm(wav.copyOfRange(body, end - (end - body) % 2), rate)
+      }
+      // Long arithmetic: a chunk size near 2 GB must not wrap the position around.
+      val next = body.toLong() + size + (size and 1)
+      if (next > wav.size) return null
+      at = next.toInt()
+    }
+    return null
+  }
+
   // ---- Test harness -----------------------------------------------------------------------------
 
   /**
@@ -684,9 +951,9 @@ class MainActivity : Activity() {
    * [EXTRA_HARNESS_MODEL], else the one in the speech model field.
    */
   private fun startHarness(intent: Intent?) {
-    val dirName = intent?.getStringExtra(EXTRA_HARNESS_DIR) ?: return
-    val model = intent.getStringExtra(EXTRA_HARNESS_MODEL) ?: speechModelField.text.toString().trim()
-    val warm = intent.getBooleanExtra(EXTRA_HARNESS_WARM, true)
+    val dirName = harnessFolder(intent, EXTRA_HARNESS_DIR) ?: return
+    val model = intent?.getStringExtra(EXTRA_HARNESS_MODEL) ?: speechModelField.text.toString().trim()
+    val warm = intent?.getBooleanExtra(EXTRA_HARNESS_WARM, true) ?: true
     val baseUrl = baseUrl()
     val token = token()
     val root = getExternalFilesDir(null)
@@ -757,6 +1024,149 @@ class MainActivity : Activity() {
       .start()
   }
 
+  /**
+   * Started with [EXTRA_SPEECH_HARNESS_DIR] = a folder in this app's external files folder holding
+   * sentences.txt (one sentence per line), it sends through [synthesize], the code the Speak button
+   * uses, and through [transcribe], the code of the Transcribe button:
+   * 1. sentence 1 once, not counted (the model loads);
+   * 2. every sentence as WAV, saved as speech_<n>.wav in the folder;
+   * 3. sentence 1 as pcm, saved as speech_1.pcm;
+   * 4. the failure paths: an empty text, a voice the model does not have, a text of 4097
+   *    characters, a voice model that is not on the phone;
+   * 5. the round trip: each speech_<n>.wav to the speech recognition model.
+   * Nothing is played. Each request is one line of results_<folder>.jsonl next to the folder. The
+   * models are [EXTRA_SPEECH_HARNESS_TTS] and [EXTRA_SPEECH_HARNESS_ASR], else the ones in the fields.
+   */
+  private fun startSpeechHarness(intent: Intent?) {
+    val dirName = harnessFolder(intent, EXTRA_SPEECH_HARNESS_DIR) ?: return
+    val ttsModel = intent?.getStringExtra(EXTRA_SPEECH_HARNESS_TTS) ?: ttsModelField.text.toString().trim()
+    val asrModel = intent?.getStringExtra(EXTRA_SPEECH_HARNESS_ASR) ?: speechModelField.text.toString().trim()
+    val voice = intent?.getStringExtra(EXTRA_SPEECH_HARNESS_VOICE)?.trim()?.ifEmpty { null }
+    val baseUrl = baseUrl()
+    val token = token()
+    val root = getExternalFilesDir(null)
+    val dir = root?.let { File(it, dirName) }
+    val sentences =
+      dir?.let { File(it, "sentences.txt") }?.takeIf { it.isFile }?.readLines()?.map { it.trim() }?.filter { it.isNotEmpty() }.orEmpty()
+    val why =
+      when {
+        harnessRunning -> "a harness is running"
+        baseUrl == null || token == null -> "not connected"
+        ttsModel.isEmpty() -> "no voice model"
+        asrModel.isEmpty() -> "no speech recognition model"
+        sentences.isEmpty() -> "no sentences.txt in $dirName"
+        else -> null
+      }
+    if (why != null || root == null || dir == null || baseUrl == null || token == null) {
+      Log.i(TAG, "speech harness: not started ($why)")
+      speakStatus.text = "Speech test harness: not started ($why)."
+      return
+    }
+    class Step(val kind: String, val n: Int, val text: String, val model: String, val voice: String?, val format: String)
+    val plan = buildList {
+      add(Step("warm", 1, sentences[0], ttsModel, voice, FORMAT_WAV))
+      sentences.forEachIndexed { i, s -> add(Step("speak", i + 1, s, ttsModel, voice, FORMAT_WAV)) }
+      add(Step("pcm", 1, sentences[0], ttsModel, voice, FORMAT_PCM))
+      add(Step("empty_input", 0, "", ttsModel, voice, FORMAT_WAV))
+      add(Step("no_voice", 1, sentences[0], ttsModel, NO_SUCH_VOICE, FORMAT_WAV))
+      add(Step("too_long", 0, "a".repeat(4097), ttsModel, voice, FORMAT_WAV))
+      add(Step("no_model", 1, sentences[0], MODEL_NOT_ON_PHONE, voice, FORMAT_WAV))
+    }
+    val results = File(root, "results_$dirName.jsonl")
+    harnessRunning = true
+    speakButton.isEnabled = false
+    transcribeButton.isEnabled = false
+    ttsModelField.setText(ttsModel)
+    speechModelField.setText(asrModel)
+    Log.i(TAG, "speech harness: ${plan.size} speech requests and ${sentences.size} round trips from $dirName, voice model $ttsModel, speech model $asrModel")
+    Thread(
+        {
+          results.delete()
+          var count = 0
+          val total = plan.size + sentences.size
+          for (step in plan) {
+            count++
+            runOnUiThread { speakStatus.text = "Speech test harness $count/$total: ${step.kind} ${step.n}…" }
+            // The empty text is sent as is: the request code must not stop it before Model Shelf.
+            val out = synthesize(baseUrl, token, step.model, step.voice, step.text, step.format)
+            var saved: String? = null
+            if (out.status == HttpURLConnection.HTTP_OK && (step.kind == "speak" || step.kind == "pcm")) {
+              val name = "speech_${step.n}.${if (step.format == FORMAT_PCM) "pcm" else "wav"}"
+              File(dir, name).writeBytes(out.bytes)
+              saved = name
+            }
+            val line =
+              JSONObject()
+                .put("n", count)
+                .put("kind", step.kind)
+                .put("sentence", step.n)
+                .put("chars", step.text.length)
+                .put("model", step.model)
+                .put("voice", step.voice ?: JSONObject.NULL)
+                .put("format", step.format)
+                .put("status", out.status)
+                .put("bytes", out.bytes.size)
+                .put("saved", saved ?: JSONObject.NULL)
+                .put("error", out.error ?: JSONObject.NULL)
+                .put("retry_after", out.retryAfter ?: JSONObject.NULL)
+                .put("total_ms", out.totalMs)
+                .put("shelf", JSONObject(out.shelf.toMap()))
+            results.appendText(line.toString() + "\n")
+            Log.i(TAG, "speech harness: $count/$total ${step.kind} ${step.n}: HTTP ${out.status}")
+            runOnUiThread { showSpeech(out, if (out.status == HttpURLConnection.HTTP_OK) speechLine(out) else null) }
+          }
+          for (i in sentences.indices) {
+            count++
+            val file = File(dir, "speech_${i + 1}.wav")
+            val a = if (file.isFile) Audio(file.name, file.readBytes()) else Audio(file.name, ByteArray(0))
+            runOnUiThread { transcribeStatus.text = "Speech test harness $count/$total: round trip ${i + 1}…" }
+            val out = if (a.bytes.isEmpty()) Transcript().apply { error = "no WAV file was saved" } else transcribe(baseUrl, token, asrModel, a)
+            val line =
+              JSONObject()
+                .put("n", count)
+                .put("kind", "round_trip")
+                .put("sentence", i + 1)
+                .put("file", file.name)
+                .put("model", asrModel)
+                .put("status", out.status)
+                .put("text", out.text)
+                .put("error", out.error ?: JSONObject.NULL)
+                .put("total_ms", out.totalMs)
+                .put("shelf", JSONObject(out.shelf.toMap()))
+            results.appendText(line.toString() + "\n")
+            Log.i(TAG, "speech harness: $count/$total round_trip ${i + 1}: HTTP ${out.status}")
+            runOnUiThread { showTranscript(out) }
+          }
+          Log.i(TAG, "speech harness: done, $total requests, ${results.absolutePath}")
+          runOnUiThread {
+            harnessRunning = false
+            speakButton.isEnabled = true
+            transcribeButton.isEnabled = true
+            speakStatus.text = "Speech test harness done: $total requests; the results are in ${results.name}."
+          }
+        },
+        "speech-harness",
+      )
+      .start()
+  }
+
+  /**
+   * The harness folder an intent names in [extra], or null. This activity is the exported launcher,
+   * so any app can start it: the harnesses run only in a debuggable build, and only on one plain
+   * folder name inside this app's external files folder (no "/", not "." or "..").
+   */
+  private fun harnessFolder(intent: Intent?, extra: String): String? {
+    val name = intent?.getStringExtra(extra) ?: return null
+    val why =
+      when {
+        (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) == 0 -> "this build is not debuggable"
+        !HARNESS_FOLDER.matches(name) || name == "." || name == ".." -> "the folder name is not a plain name"
+        else -> return name
+      }
+    Log.i(TAG, "harness: not started ($why)")
+    return null
+  }
+
   // ---- Helpers ----------------------------------------------------------------------------------
 
   private fun seconds(ms: Long) = String.format(Locale.US, "%.2f s", ms / 1000.0)
@@ -790,8 +1200,13 @@ class MainActivity : Activity() {
     const val KEY_TOKEN = "token"
     const val KEY_MODEL = "model"
     const val KEY_SPEECH_MODEL = "speech_model"
+    const val KEY_TTS_MODEL = "tts_model"
+    const val KEY_VOICE = "voice"
     const val SHELF_HEADER = "X-ModelShelf-"
     const val TRANSCRIPTIONS = "/v1/audio/transcriptions"
+    const val SPEECH = "/v1/audio/speech"
+    const val FORMAT_WAV = "wav"
+    const val FORMAT_PCM = "pcm"
     /** Model Shelf takes a request body of at most 25 MB; the form around the file needs a little of it. */
     const val MAX_AUDIO_BYTES = 25 * 1024 * 1024 - 64 * 1024
     const val EXAMPLE_NAME = "example_librispeech.wav"
@@ -803,5 +1218,13 @@ class MainActivity : Activity() {
     const val EXTRA_HARNESS_MODEL = "harness_model"
     const val EXTRA_HARNESS_WARM = "harness_warm"
     const val MODEL_NOT_ON_PHONE = "litert-community/not-on-this-phone"
+    /** A harness folder: one plain name, no path. */
+    val HARNESS_FOLDER = Regex("[A-Za-z0-9._-]{1,64}")
+    /** Speech test harness extras (adb shell am start ... --es speech_harness_dir <folder>). */
+    const val EXTRA_SPEECH_HARNESS_DIR = "speech_harness_dir"
+    const val EXTRA_SPEECH_HARNESS_TTS = "speech_harness_tts_model"
+    const val EXTRA_SPEECH_HARNESS_ASR = "speech_harness_asr_model"
+    const val EXTRA_SPEECH_HARNESS_VOICE = "speech_harness_voice"
+    const val NO_SUCH_VOICE = "no_such_voice"
   }
 }

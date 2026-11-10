@@ -84,6 +84,9 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
 private const val TAG = "AGTtsPlaybackController"
+
+/** Model Shelf: one line when read-aloud audio starts, ends or is stopped (no text). */
+private const val READ_ALOUD_TAG = "MSReadAloud"
 private const val SAMPLE_RATE_HZ = 24000
 private const val MIN_AUDIO_BUFFER_BYTES = 64 * 1024
 
@@ -972,6 +975,9 @@ internal constructor(
    * Unlike [dismiss], this does not block [streamAutoPlay] from speaking a streaming message.
    */
   fun stop() {
+    if (_playbackState.value == TtsPlaybackState.PLAYING || _playbackState.value == TtsPlaybackState.PAUSED) {
+      Log.i(READ_ALOUD_TAG, "Read-aloud stopped")
+    }
     stopLocalPlaybackOnly()
     val provider = ttsServiceProvider
     if (provider != null) {
@@ -1075,6 +1081,7 @@ internal constructor(
     _currentWordIndex.value =
       if (_currentWordIndex.value != null || isWordHighlightModel(selectedModelId)) 0 else null
     _playbackState.value = TtsPlaybackState.PLAYING
+    Log.i(READ_ALOUD_TAG, "Playing sentence ${index + 1} of ${list.size} with $selectedModelId")
     _isExpanded.value = true
 
     val chunk = list[index]
@@ -1087,6 +1094,10 @@ internal constructor(
       modelId == TtsModelIdentifier.MEDIAPIPE_PHONON_31M
 
   private fun finishPlayback(completedNaturally: Boolean = false) {
+    Log.i(
+      READ_ALOUD_TAG,
+      "Read-aloud ended: " + if (completedNaturally) "every sentence played" else "it stopped before the end",
+    )
     playbackGeneration += 1
     completedAllSentencesNaturally = completedNaturally
     discardPrefetch()
@@ -1552,6 +1563,7 @@ internal constructor(
             sink.play()
             sink.setSpeed(_playbackSpeed.value)
             loggedFirstChunk = true
+            Log.i(READ_ALOUD_TAG, "Audio started: sentence ${sentenceIndex + 1}")
             val requestMark = playbackRequestMark
             val drainMark = lastSentenceDrainMark
             when {

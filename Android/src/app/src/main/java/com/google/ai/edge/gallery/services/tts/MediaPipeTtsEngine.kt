@@ -30,6 +30,7 @@ import com.google.mediapipe.tasks.core.Delegate
 import java.io.File
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.time.measureTime
 import kotlin.time.measureTimedValue
 import kotlinx.coroutines.CancellationException
@@ -174,6 +175,8 @@ internal constructor(
     val modelSize: Long,
     val synthesizer: MediaPipeSynthesizer,
     val voiceIds: List<String>,
+    /** The delegate the model was created with (Model Shelf: reported by the local API). */
+    val delegate: Delegate,
   ) {
     /**
      * The (voice, language) pairs, as [SynthesisOptions.voiceId] and [SynthesisOptions.locale],
@@ -292,6 +295,28 @@ internal constructor(
     }
   }
 
+  /**
+   * Model Shelf: counts [prepare] and [synthesize] calls from every user of this engine (the app's
+   * read-aloud and the local API share it), so a user can tell whether another one used the engine
+   * after its own last call.
+   */
+  private val uses = AtomicLong(0)
+
+  /** Model Shelf: the number of [prepare] and [synthesize] calls so far. */
+  val useCount: Long
+    get() = uses.get()
+
+  /**
+   * Model Shelf: the engine model id and the delegate ("gpu" or "cpu") of the loaded model, or null
+   * when none is loaded.
+   */
+  fun loadedModelAndDelegate(): Pair<String, String>? =
+    prepared?.let { it.spec.engineModelId to it.delegate.name.lowercase() }
+
+  /** Model Shelf: the voices of the loaded model [modelId] as the model lists them, or null. */
+  fun loadedVoiceIds(modelId: String): List<String>? =
+    prepared?.takeIf { it.spec.engineModelId == modelId }?.voiceIds
+
   override fun isModelLoaded(modelId: String?): Boolean {
     if (!status.value.isEngineLoaded) return false
     val loaded = synchronized(stateLock) { prepared } ?: return false
@@ -301,6 +326,7 @@ internal constructor(
   }
 
   override suspend fun prepare(config: TtsConfig) {
+    uses.incrementAndGet()
     val callerJob = currentCoroutineContext()[Job]
     callerJob?.let { synchronized(stateLock) { inFlightJobs.add(it) } }
     try {
@@ -365,6 +391,7 @@ internal constructor(
   }
 
   override fun synthesize(text: String, config: TtsConfig?): TtsOutput {
+    uses.incrementAndGet()
     val sanitized = sanitizeTextForMediaPipe(text)
     if (sanitized.isEmpty()) {
       return TtsOutput.AudioStream(emptyFlow())
@@ -796,6 +823,7 @@ internal constructor(
       modelSize = modelFile.length(),
       synthesizer = synthesizer,
       voiceIds = voiceIds,
+      delegate = delegate,
     )
   }
 

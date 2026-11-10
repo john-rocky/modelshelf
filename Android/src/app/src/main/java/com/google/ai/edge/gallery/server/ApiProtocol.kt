@@ -128,6 +128,21 @@ data class ApiModelEntry(
     get() = accelerators.firstOrNull().let { it == "npu" || it == "tpu" }
 }
 
+/**
+ * A speech model the API holds, for /api/ps, the notification and the Local API screen. [kind] is
+ * the word GET /v1/models uses: "transcription" or "speech".
+ */
+data class LoadedAudioModel(
+  val name: String,
+  val kind: String,
+  /** npu, gpu or cpu. */
+  val backend: String,
+  val sizeBytes: Long,
+  val commit: String,
+  /** Wall-clock time it unloads at; Long.MAX_VALUE = not set. */
+  val expiresAtMs: Long,
+)
+
 /** A model's own sampler values and where they come from; null values fall back to the app's. */
 data class SamplerDefaults(
   val topK: Int? = null,

@@ -47,11 +47,18 @@ data class AsrEntry(
   val listedBy: String,
 )
 
-enum class AsrKind {
+enum class AsrKind(
+  /**
+   * Whether the engine is told the request's language. Neither is: Phonon-2.5-English is English
+   * only, and MediaPipe's AudioTranscriber (Parakeet TDT v3) finds the language itself. The language
+   * is still checked against the model's list.
+   */
+  val takesLanguage: Boolean
+) {
   /** Phonon-2.5-English: Model Shelf's own LiteRT pipeline (NPU, GPU or CPU). */
-  PHONON,
+  PHONON(takesLanguage = false),
   /** A .litertlm file for MediaPipe's AudioTranscriber (Parakeet TDT). */
-  MEDIAPIPE,
+  MEDIAPIPE(takesLanguage = false),
 }
 
 enum class TranscriptFormat(val wire: String) {
@@ -133,18 +140,36 @@ fun checkTranscriptionLanguage(language: String?, entry: AsrEntry) {
   }
 }
 
+/**
+ * The fields of [request] the API reads but does not apply with [entry], for the log and
+ * X-ModelShelf-Not-Applied: the unknown fields, and `language` when the engine is not told it.
+ */
+fun transcriptionNotApplied(request: TranscriptionRequest, entry: AsrEntry): List<String> =
+  request.ignored + listOfNotNull("language".takeIf { request.language != null && !entry.kind.takesLanguage })
+
+/**
+ * The language verbose_json names: the request's language, else the model's language when it
+ * takes only one; else null and the field is left out (neither engine says which language it
+ * heard, and a list's first language is not the audio's).
+ */
+fun transcriptLanguage(request: TranscriptionRequest, entry: AsrEntry): String? =
+  (request.language ?: entry.languages.singleOrNull())?.let(::languageName)
+
 /** One piece of a transcript: a Phonon window, or a final segment of MediaPipe's transcriber. */
 class TranscriptPiece(val text: String, val startS: Double, val endS: Double, val tokens: List<Int>)
 
 object AsrJson {
   fun json(text: String): String = JsonObject().apply { addProperty("text", text) }.toString()
 
-  /** OpenAI's verbose_json: the fields Model Shelf knows (no log probabilities). */
-  fun verbose(text: String, language: String, durationS: Double, pieces: List<TranscriptPiece>): String =
+  /**
+   * OpenAI's verbose_json: the fields Model Shelf knows (no log probabilities). A null [language]
+   * leaves the field out ([transcriptLanguage]).
+   */
+  fun verbose(text: String, language: String?, durationS: Double, pieces: List<TranscriptPiece>): String =
     JsonObject()
       .apply {
         addProperty("task", "transcribe")
-        addProperty("language", language)
+        if (language != null) addProperty("language", language)
         addProperty("duration", round3(durationS))
         addProperty("text", text)
         add(
