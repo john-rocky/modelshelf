@@ -132,6 +132,12 @@ android {
   }
 }
 
+// Model Shelf: the JVM tests run on Java 21: the LiteRT-LM classes (Contents, Conversation) are Java
+// 21 class files, which a Java 17 test JVM cannot load.
+tasks.withType<Test>().configureEach {
+  javaLauncher.set(javaToolchains.launcherFor { languageVersion.set(JavaLanguageVersion.of(21)) })
+}
+
 kotlin {
   compilerOptions {
     jvmTarget.set(JvmTarget.JVM_11)
