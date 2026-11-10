@@ -55,6 +55,7 @@ class LinkHandlingTest {
     val routes = stack.toMutableList()
     val done = mutableListOf<String>()
     val logs = mutableListOf<String>()
+    val gateThreads: MutableList<Thread> = java.util.Collections.synchronizedList(mutableListOf())
 
     override val tasks: List<Task>
       get() = allTasks
@@ -81,6 +82,7 @@ class LinkHandlingTest {
     }
 
     override fun gate(model: Model): String? {
+      gateThreads.add(Thread.currentThread())
       done.add("gate ${model.name}")
       return gateSentence
     }
@@ -343,5 +345,22 @@ class LinkHandlingTest {
         assertEquals("lines with the link's words for $text", emptyList<String>(), leaked)
       }
     }
+  }
+
+  // Finding 11: the gate takes the chat-engine slot's lock, under which an engine may be closing
+  // (up to 0.9 s in round 10c's logs). At 35e5905 it was asked during composition, on the main
+  // thread. After: never on the thread that reads the links (the main thread in the app).
+  @Test
+  fun theGateIsNotAskedOnTheThreadThatReadsTheLinks() {
+    val screens = Screens(home)
+    val reader = runBlocking {
+      handleLink(link("$DEEP_LINK_SCHEME://model/llm_chat/${small.name}"), screens)
+      Thread.currentThread()
+    }
+    assertEquals(1, screens.gateThreads.size)
+    assertTrue(
+      "the gate was asked on the thread that reads the links",
+      screens.gateThreads.none { it === reader },
+    )
   }
 }
