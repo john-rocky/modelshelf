@@ -42,6 +42,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -83,6 +84,7 @@ import com.google.ai.edge.gallery.ui.common.OnAppBackgroundedEffect
 import com.google.ai.edge.gallery.ui.common.chat.ModelDownloadStatusInfoPanel
 import com.google.ai.edge.gallery.ui.common.tos.TosViewModel
 import com.google.ai.edge.gallery.ui.home.HomeScreen
+import com.google.ai.edge.gallery.ui.llmchat.LlmChatModelHelper
 import com.google.ai.edge.gallery.ui.modelmanager.GlobalModelManager
 import com.google.ai.edge.gallery.ui.modelmanager.MODEL_ALLOWLIST_TEST_FILE_PATH
 import com.google.ai.edge.gallery.ui.modelmanager.ModelManager
@@ -534,14 +536,33 @@ fun GalleryNavHost(
     )
   }
 
+  // Model Shelf: the sentence a link got instead of its screen
+  // (LlmChatModelHelper.sentenceInsteadOfLinkedScreen), shown over the current screen until Close.
+  val linkContext = LocalContext.current
+  var linkSentence by remember { mutableStateOf<String?>(null) }
+  linkSentence?.let { sentence -> ErrorDialog(error = sentence, onDismiss = { linkSentence = null }) }
+
   // Handle incoming intents for deep links
-  val intent = androidx.activity.compose.LocalActivity.current?.intent
+  // Model Shelf: MainActivity is singleTask (one screen, so one chat engine), so a link that comes
+  // while the screen runs arrives through onNewIntent. Reading the count of new intents here runs
+  // this part again for each of them.
+  val activity = androidx.activity.compose.LocalActivity.current
+  var newIntents by remember { mutableIntStateOf(0) }
+  DisposableEffect(activity) {
+    val listener = androidx.core.util.Consumer<android.content.Intent> { newIntents++ }
+    (activity as? androidx.activity.ComponentActivity)?.addOnNewIntentListener(listener)
+    onDispose {
+      (activity as? androidx.activity.ComponentActivity)?.removeOnNewIntentListener(listener)
+    }
+  }
+  val intentsSeen = newIntents
+  val intent = activity?.intent
   val data = intent?.data
   // Wait until the model manager has been initialized and the tasks are available.
   if (data != null && modelManagerUiState.tasks.isNotEmpty()) {
     intent.data = null
     val uriStr = data.toString()
-    Log.d(TAG, "navigation link clicked: $data")
+    Log.d(TAG, "navigation link clicked: $data (new intents so far: $intentsSeen)")
     // 1. Precise model deep links: <DEEP_LINK_SCHEME>://model/<taskId>/<modelName>
     if (uriStr.startsWith("$DEEP_LINK_SCHEME://model/")) {
       if (data.pathSegments.size >= 2) {
@@ -555,7 +576,25 @@ fun GalleryNavHost(
             } else {
               "$ROUTE_MODEL/${taskId}/${model.name}"
             }
-          navController.navigate(route)
+          // Model Shelf: a link to the chat that is open already (no question) leaves it as it is
+          // instead of opening a second copy of it on top.
+          val current = navController.currentBackStackEntry
+          val sameChatOpen =
+            queryStr.isNullOrEmpty() &&
+              current?.destination?.route?.startsWith("$ROUTE_MODEL/") == true &&
+              current.arguments?.getString("taskId") == taskId &&
+              current.arguments?.getString("modelName") == model.name
+          val sentence =
+            if (sameChatOpen) null
+            else LlmChatModelHelper.sentenceInsteadOfLinkedScreen(linkContext, model)
+          if (sameChatOpen) {
+            Log.d(TAG, "The link's chat is open already: $route")
+          } else if (sentence != null) {
+            Log.i(TAG, "The link's screen does not open: $sentence ($route)")
+            SideEffect { linkSentence = sentence }
+          } else {
+            navController.navigate(route)
+          }
         }
       } else {
         Log.e(TAG, "Malformed deep link URI received: $data")
@@ -585,7 +624,14 @@ fun GalleryNavHost(
               } else {
                 "$ROUTE_MODEL/${task.id}/${defaultModel.name}"
               }
-            navController.navigate(route)
+            val sentence =
+              LlmChatModelHelper.sentenceInsteadOfLinkedScreen(linkContext, defaultModel)
+            if (sentence != null) {
+              Log.i(TAG, "The link's screen does not open: $sentence ($route)")
+              SideEffect { linkSentence = sentence }
+            } else {
+              navController.navigate(route)
+            }
           } else {
             Log.e(TAG, "No available model found for task: $host")
           }

@@ -96,6 +96,7 @@ import com.google.ai.edge.gallery.services.asr.SystemSpeechAsrService
 import com.google.ai.edge.gallery.services.tts.TtsSettingsRepository
 import com.google.ai.edge.gallery.services.tts.TtsSettingsUiState
 import com.google.ai.edge.gallery.ui.common.isMemoryLow
+import com.google.ai.edge.gallery.ui.llmchat.LlmChatModelHelper
 import com.google.ai.edge.litertlm.Contents
 import com.google.gson.Gson
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -642,6 +643,13 @@ constructor(
   public override fun onCleared() {
     voicePreviewController.onCleared()
     authService.dispose()
+    // Model Shelf: the screen of these models is gone for good (its task was removed, or the
+    // activity finished), so a chat engine one of them holds is closed: no chat engine outlives
+    // every screen (D-614 round 10c).
+    LlmChatModelHelper.closeEnginesOf(
+      models = uiState.value.tasks.flatMap { it.models },
+      why = "its screen is gone",
+    )
   }
 
   fun getTaskById(id: String): Task? {

@@ -67,8 +67,12 @@
           recreate the activity when UI mode changes (e.g. setting dark mode).
           Instead, just recompose the view.
          -->
+        <!-- Model Shelf: singleTask = one Model Shelf screen, whichever way it is opened (launcher,
+             notification, link, another app), so one screen holds the chat engine (D-614 round
+             10c). A new intent comes to the running screen through onNewIntent. -->
         <activity
             android:name="com.google.ai.edge.gallery.MainActivity"
+            android:launchMode="singleTask"
             android:exported="true"
             android:theme="@style/Theme.Gallery.SplashScreen"
             android:screenOrientation="portrait"

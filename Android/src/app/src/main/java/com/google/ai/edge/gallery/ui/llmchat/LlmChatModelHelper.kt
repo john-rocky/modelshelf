@@ -43,7 +43,10 @@ import com.google.ai.edge.gallery.runtime.EXTRA_CONTEXT_MAX_OUTPUT_TOKENS
 import com.google.ai.edge.gallery.runtime.LlmConversationInstance
 import com.google.ai.edge.gallery.runtime.LlmModelHelper
 import com.google.ai.edge.gallery.runtime.ResultListener
+import com.google.ai.edge.gallery.server.ApiHoldsModelFile
+import com.google.ai.edge.gallery.server.ChatEngineSlot
 import com.google.ai.edge.gallery.server.EngineOwnership
+import com.google.ai.edge.gallery.server.makeForChat
 import com.google.ai.edge.litertlm.Backend
 import com.google.ai.edge.litertlm.Content
 import com.google.ai.edge.litertlm.Contents
@@ -60,13 +63,16 @@ import com.google.ai.edge.litertlm.SamplerConfig
 import com.google.ai.edge.litertlm.ToolProvider
 import java.io.ByteArrayOutputStream
 import java.util.Collections
+import java.util.IdentityHashMap
 import java.util.concurrent.CancellationException
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.DisposableHandle
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 private const val TAG = "AGLlmChatModelHelper"
@@ -76,6 +82,14 @@ private const val EXTRA_CONTEXT_EPHEMERAL_INFERENCE = "aicore_ephemeral_inferenc
 private const val API_HOLDS_MODEL =
   "The local API is using this model. Stop the local API in Settings > Local API to chat with " +
     "the model here."
+
+// Model Shelf: shown when another chat's engine is answering while this chat opens its model (one
+// chat engine per process: ChatEngineSlot closes nothing that answers).
+private const val ANOTHER_CHAT_ANSWERS =
+  "Another chat is still answering; open this model again when that answer ends."
+
+// Model Shelf: how long the answer of a screen that is gone gets to stop before its engine closes.
+private const val ANSWER_STOP_WAIT_MS = 10_000L
 
 /**
  * Holds the runtime state for an initialized LiteRT-LM model.
@@ -88,11 +102,14 @@ private const val API_HOLDS_MODEL =
  *   shared agent conversation manager), because the engine initialization for that path runs
  *   outside [LlmChatModelHelper.initialize] and so is not measured. Tracks nothing when the model
  *   does not support benchmark telemetry.
+ * @param turnsInFlight Model Shelf: the answers of the main conversation that run now (0 or 1); the
+ *   process's one chat engine is not closed for another chat while it answers.
  */
 data class LlmModelInstance(
   val engine: Engine,
   var conversation: Conversation,
   val metricsTracker: MetricsTracker? = null,
+  val turnsInFlight: AtomicInteger = AtomicInteger(0),
 ) : LlmConversationInstance {
   val activeEphemeralConversations: MutableSet<Conversation> =
     Collections.synchronizedSet(mutableSetOf())
@@ -106,6 +123,15 @@ data class LlmModelInstance(
 object LlmChatModelHelper : LlmModelHelper {
   // Indexed by model name.
   private val cleanUpListeners: MutableMap<String, CleanUpListener> = mutableMapOf()
+
+  // Model Shelf: the process's one chat engine (D-614 round 10c). Every chat engine is made here,
+  // in initialize, through this slot, which first closes any chat engine still alive (another
+  // screen's, or one a screen that is gone left behind) and closes each engine once.
+  private val chatEngines =
+    ChatEngineSlot<Model, LlmModelInstance>(
+      isAnswering = { it.turnsInFlight.get() > 0 },
+      closeEngine = { model, instance -> closeInstance(model, instance) },
+    )
 
   @Suppress("GlobalCoroutineDispatchers", "AndroidLintDispatcherUsage")
   internal var ioDispatcher: CoroutineDispatcher = Dispatchers.IO
@@ -162,11 +188,6 @@ object LlmChatModelHelper : LlmModelHelper {
         Accelerator.TPU -> Backend.NPU(nativeLibraryDir = context.applicationInfo.nativeLibraryDir)
       }
     Log.d(TAG, "Preferred backend: $preferredBackend")
-    Log.i(
-      TAG,
-      "LiteRT-LM $LITERT_LM_RUNTIME_VERSION: creating the engine for '${model.name}' on " +
-        "${model.currentAccelerator ?: Accelerator.GPU}, max tokens $maxTokens",
-    )
 
     val modelPath = model.getPath(context = context)
     val engineConfig =
@@ -214,56 +235,148 @@ object LlmChatModelHelper : LlmModelHelper {
         ioDispatcher = ioDispatcher,
       )
     // Create an instance of LiteRT LM engine and conversation.
-    try {
-      if (!EngineOwnership.reserveForChat(model.name, modelPath)) {
-        throw IllegalStateException(API_HOLDS_MODEL)
-      }
-      val enableBenchmark = false
-      ExperimentalFlags.enableBenchmark = enableBenchmark
-      ExperimentalFlags.enableSpeculativeDecoding = speculativeDecoding
-      Log.d(TAG, "Speculative decoding enabled: $speculativeDecoding")
-      val engine = Engine(engineConfig)
+    // Model Shelf: through the process's one chat-engine slot. Every chat engine still alive is
+    // closed before this one is made, and none is closed while it answers (then this chat gets
+    // one sentence instead of an engine).
+    val made =
       try {
-        engine.initialize()
-      } finally {
-        ExperimentalFlags.enableSpeculativeDecoding = false
-        ExperimentalFlags.enableBenchmark = false
-      }
+        chatEngines.makeForChat(
+          owner = model,
+          name = model.name,
+          path = modelPath,
+          create = {
+            Log.i(
+              TAG,
+              "LiteRT-LM $LITERT_LM_RUNTIME_VERSION: creating the engine for '${model.name}' on " +
+                "${model.currentAccelerator ?: Accelerator.GPU}, max tokens $maxTokens",
+            )
+            val enableBenchmark = false
+            ExperimentalFlags.enableBenchmark = enableBenchmark
+            ExperimentalFlags.enableSpeculativeDecoding = speculativeDecoding
+            Log.d(TAG, "Speculative decoding enabled: $speculativeDecoding")
+            val engine = Engine(engineConfig)
+            try {
+              engine.initialize()
+            } finally {
+              ExperimentalFlags.enableSpeculativeDecoding = false
+              ExperimentalFlags.enableBenchmark = false
+            }
 
-      val conversation =
-        try {
-          createConversation(
-            engine = engine,
-            model = model,
-            systemInstruction = systemInstruction,
-            tools = tools,
-            enableConversationConstrainedDecoding = enableConversationConstrainedDecoding,
-            initialMessages = initialMessages,
-            enableResponseFormat = enableResponseFormat,
-          )
-        } catch (e: Exception) {
-          try {
-            engine.close()
-          } catch (_: Exception) {}
-          throw e
-        }
-      model.markInitialized(
-        LlmModelInstance(
-          engine = engine,
-          conversation = conversation,
-          metricsTracker = metricsTracker,
+            val conversation =
+              try {
+                createConversation(
+                  engine = engine,
+                  model = model,
+                  systemInstruction = systemInstruction,
+                  tools = tools,
+                  enableConversationConstrainedDecoding = enableConversationConstrainedDecoding,
+                  initialMessages = initialMessages,
+                  enableResponseFormat = enableResponseFormat,
+                )
+              } catch (e: Exception) {
+                try {
+                  engine.close()
+                } catch (_: Exception) {}
+                throw e
+              }
+            LlmModelInstance(
+              engine = engine,
+              conversation = conversation,
+              metricsTracker = metricsTracker,
+            )
+          },
+          publish = { instance -> model.markInitialized(instance) },
+          closing = { other ->
+            Log.i(
+              TAG,
+              "Clean up model '${other.name}' done (closed before '${model.name}' opens: one chat " +
+                "engine per process)",
+            )
+          },
         )
-      )
-    } catch (e: Exception) {
-      EngineOwnership.releaseForChat(model.name)
-      val errorMsg = cleanUpMediapipeTaskErrorMessage(e.message ?: "Unknown error")
-      model.markInitializationFailed(errorMsg)
+      } catch (e: ApiHoldsModelFile) {
+        // The local API took the file after the check at the top (its reservation is given back).
+        Log.i(TAG, "'${model.name}': $API_HOLDS_MODEL")
+        model.markInitializationFailed(API_HOLDS_MODEL)
+        metricsTracker.onModelInitialized()
+        onDone(API_HOLDS_MODEL)
+        return
+      } catch (e: Exception) {
+        // makeForChat gave back the chat's reservation of the file.
+        val errorMsg = cleanUpMediapipeTaskErrorMessage(e.message ?: "Unknown error")
+        model.markInitializationFailed(errorMsg)
+        metricsTracker.onModelInitialized()
+        onDone(errorMsg)
+        return
+      }
+    if (made is ChatEngineSlot.Result.Answering<*>) {
+      val answering = (made.owner as? Model)?.name ?: "another chat"
+      Log.i(TAG, "'${model.name}': $ANOTHER_CHAT_ANSWERS ('$answering' answers)")
+      model.markInitializationFailed(ANOTHER_CHAT_ANSWERS)
       metricsTracker.onModelInitialized()
-      onDone(errorMsg)
+      onDone(ANOTHER_CHAT_ANSWERS)
       return
     }
+    logLiveChatEngines("after creating the engine for '${model.name}'")
     metricsTracker.onModelInitialized()
     onDone("")
+  }
+
+  /**
+   * Model Shelf: closes the chat engine that one of [models] holds: the models of a screen that is
+   * gone for good, so no chat engine outlives every screen. Runs on the IO dispatcher; an answer
+   * the engine runs is stopped first and gets [ANSWER_STOP_WAIT_MS] to end (an engine that still
+   * answers then stays until the answer ends and another chat opens).
+   */
+  fun closeEnginesOf(models: Collection<Model>, why: String) {
+    val owners = Collections.newSetFromMap(IdentityHashMap<Model, Boolean>())
+    owners.addAll(models)
+    val engines = chatEngines.enginesOf { it in owners }
+    if (engines.isEmpty()) return
+    CoroutineScope(ioDispatcher).launch {
+      for (instance in engines) {
+        val model = chatEngines.ownerOf(instance) ?: continue
+        if (instance.turnsInFlight.get() > 0) {
+          Log.i(TAG, "Stopping the answer of '${model.name}' ($why)")
+          stopInstance(instance)
+          var waitedMs = 0L
+          while (instance.turnsInFlight.get() > 0 && waitedMs < ANSWER_STOP_WAIT_MS) {
+            delay(50)
+            waitedMs += 50
+          }
+          if (instance.turnsInFlight.get() > 0) {
+            Log.w(TAG, "'${model.name}' still answers $ANSWER_STOP_WAIT_MS ms after the stop")
+            continue
+          }
+        }
+        if (chatEngines.close(instance)) {
+          Log.i(TAG, "Clean up model '${model.name}' done ($why)")
+          logLiveChatEngines("after closing the engine of '${model.name}'")
+        }
+      }
+    }
+  }
+
+  /**
+   * Model Shelf: the sentence that a link to a screen of [model] shows over the current screen
+   * instead of opening that screen, or null when the screen opens. A screen opened on top of a chat
+   * gets no engine while a chat engine answers (the slot closes nothing that answers), nor while
+   * the local API holds the model file; and going back from such a screen cleans up the AI Chat
+   * executor's one session, which the chat below would need for its next question. So the link
+   * opens nothing then, and the chat below stays as it is.
+   */
+  fun sentenceInsteadOfLinkedScreen(context: Context, model: Model): String? =
+    when {
+      chatEngines.anyAnswering() -> ANOTHER_CHAT_ANSWERS
+      chatEngines.liveCount > 0 && EngineOwnership.apiHolds(model.getPath(context = context)) ->
+        API_HOLDS_MODEL
+      else -> null
+    }
+
+  // Model Shelf: the number of chat engines alive in this process (0 or 1), read in the device
+  // checks (D-614 round 10c, tools/r10c_engines.py).
+  private fun logLiveChatEngines(after: String) {
+    Log.i(TAG, "Live chat engines in this process: ${chatEngines.liveCount} ($after)")
   }
 
   override fun resetConversation(
@@ -371,6 +484,26 @@ object LlmChatModelHelper : LlmModelHelper {
 
     val instance = model.instance as LlmModelInstance
 
+    // Model Shelf: closed through the chat-engine slot, which closes each engine once: the slot may
+    // have closed this one already (another chat opened, or the screen is gone).
+    if (!chatEngines.close(instance)) {
+      Log.d(TAG, "The engine of '${model.name}' was closed already.")
+      if (model.instance === instance) {
+        model.resetInitialization()
+      }
+      onDone()
+      return
+    }
+    onDone()
+    logLiveChatEngines("after closing the engine of '${model.name}'")
+  }
+
+  /**
+   * Model Shelf: closes [instance] of [model]: what cleanUp did before the chat-engine slot. The
+   * slot calls this once per engine, with its lock held.
+   */
+  @OptIn(ExperimentalApi::class) // as cleanUp before
+  private fun closeInstance(model: Model, instance: LlmModelInstance) {
     val snapshotEphemerals = instance.activeEphemeralConversations.toList()
     instance.activeEphemeralConversations.clear()
     for (ephemeral in snapshotEphemerals) {
@@ -406,10 +539,29 @@ object LlmChatModelHelper : LlmModelHelper {
     if (onCleanUp != null) {
       onCleanUp()
     }
-    model.resetInitialization()
+    // Model Shelf: the model's state goes back to idle only if this is still its engine (an older
+    // engine of a model that loads again now leaves the new load alone).
+    if (model.instance === instance) {
+      model.resetInitialization()
+    }
 
-    onDone()
     Log.d(TAG, "Clean up done.")
+  }
+
+  // Model Shelf: stops what [instance] answers now (the main conversation and any ephemeral one).
+  private fun stopInstance(instance: LlmModelInstance) {
+    try {
+      instance.conversation.cancelProcess()
+    } catch (e: Exception) {
+      Log.w(TAG, "Failed to cancel conversation process", e)
+    }
+    for (ephemeral in instance.activeEphemeralConversations.toList()) {
+      try {
+        ephemeral.cancelProcess()
+      } catch (e: Exception) {
+        Log.w(TAG, "Failed to cancel ephemeral conversation process", e)
+      }
+    }
   }
 
   override fun stopResponse(model: Model) {
@@ -486,6 +638,18 @@ object LlmChatModelHelper : LlmModelHelper {
         instance.conversation
       }
 
+    // Model Shelf: an answer of the main conversation counts from the send to the engine's last
+    // callback (or a failure before the send), so the chat-engine slot does not close the engine
+    // under it.
+    // Its start and end are logged for the device checks (D-614 round 10c).
+    val turnCounted = AtomicBoolean(false)
+    fun endCountedTurn(how: String) {
+      if (turnCounted.compareAndSet(true, false)) {
+        instance.turnsInFlight.decrementAndGet()
+        Log.i(TAG, "Answer of '${model.name}' ended ($how)")
+      }
+    }
+
     val ephemeralClosed = AtomicBoolean(false)
     var scopeCompletionHandle: DisposableHandle? = null
     fun closeEphemeralConversationOnce() {
@@ -547,6 +711,10 @@ object LlmChatModelHelper : LlmModelHelper {
         extraContext[EXTRA_CONTEXT_MAX_OUTPUT_TOKENS]?.toIntOrNull()?.takeIf { it > 0 }
 
       // Step 4: Dispatch asynchronous streaming inference to the native LiteRT-LM engine.
+      if (!isEphemeral && turnCounted.compareAndSet(false, true)) {
+        instance.turnsInFlight.incrementAndGet()
+        Log.i(TAG, "Answer of '${model.name}' started")
+      }
       conversation.sendMessageAsync(
         Contents.of(contents),
         object : MessageCallback {
@@ -572,6 +740,7 @@ object LlmChatModelHelper : LlmModelHelper {
                 )
             }
             resultListener("", true, null)
+            endCountedTurn("done")
           }
 
           override fun onError(throwable: Throwable) {
@@ -596,6 +765,7 @@ object LlmChatModelHelper : LlmModelHelper {
               }
               onError("Error: ${throwable.message}")
             }
+            endCountedTurn(if (throwable is CancellationException) "stopped" else "error")
           }
         },
         finalExtraContext,
@@ -612,6 +782,7 @@ object LlmChatModelHelper : LlmModelHelper {
             errorMessage = e.message ?: "Unknown error",
           )
       }
+      endCountedTurn("not sent: ${e.message}")
       throw e
     }
   }
