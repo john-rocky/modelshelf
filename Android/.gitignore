@@ -42,6 +42,11 @@ render.experimental.xml
 *.jks
 *.keystore
 
+# Model Shelf: the release signing values (app/build.gradle.kts) live outside the checkout; a copy that
+# lands in it is never committed
+release-signing.properties
+*signing*.properties
+
 # Google Services (e.g. APIs or Firebase)
 google-services.json
 

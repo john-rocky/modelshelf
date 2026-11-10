@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+import java.util.Properties
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
@@ -25,6 +26,46 @@ plugins {
   alias(libs.plugins.oss.licenses)
   alias(libs.plugins.ksp)
 }
+
+// Model Shelf: the release key comes from outside the repository, and a release build never falls back
+// to the debug key or to an unsigned file. Four values, each read from the first place that has it:
+//   1. a Gradle property:      -Pmodelshelf.release.storeFile=...  (storePassword, keyAlias, keyPassword)
+//   2. an environment variable: MODELSHELF_RELEASE_STORE_FILE  (_STORE_PASSWORD, _KEY_ALIAS, _KEY_PASSWORD)
+//   3. a properties file outside the checkout with the keys storeFile, storePassword, keyAlias and
+//      keyPassword: -Pmodelshelf.release.signing=<file> or MODELSHELF_RELEASE_SIGNING=<file>, else
+//      ~/.modelshelf/release-signing.properties
+// The keystore path is absolute (a relative one is read from this app module's folder). Without all four
+// values, or without the keystore file, the tasks that make a signed release (assembleRelease,
+// bundleRelease and the packaging and signing tasks under them) stop before any task runs, with one
+// sentence; debug builds and unit tests never read these values.
+val releaseSigningKeys = listOf("storeFile", "storePassword", "keyAlias", "keyPassword")
+val releaseSigningFile: File =
+  file(
+    (findProperty("modelshelf.release.signing") as String?)?.takeIf { it.isNotBlank() }
+      ?: System.getenv("MODELSHELF_RELEASE_SIGNING")?.takeIf { it.isNotBlank() }
+      ?: "${System.getProperty("user.home")}/.modelshelf/release-signing.properties"
+  )
+val releaseSigning: Map<String, String> = run {
+  val fromFile = Properties()
+  if (releaseSigningFile.isFile) releaseSigningFile.inputStream().use { fromFile.load(it) }
+  releaseSigningKeys
+    .mapNotNull { key ->
+      val env = "MODELSHELF_RELEASE_" + key.replace(Regex("([A-Z])"), "_$1").uppercase()
+      val value =
+        (findProperty("modelshelf.release.$key") as String?)?.takeIf { it.isNotEmpty() }
+          ?: System.getenv(env)?.takeIf { it.isNotEmpty() }
+          ?: fromFile.getProperty(key)?.takeIf { it.isNotEmpty() }
+      value?.let { key to it }
+    }
+    .toMap()
+}
+val releaseSigningMissing: List<String> =
+  releaseSigningKeys.filter { it !in releaseSigning } +
+    listOfNotNull(
+      releaseSigning["storeFile"]
+        ?.takeIf { !file(it).isFile }
+        ?.let { "a keystore file at $it" }
+    )
 
 android {
   namespace = "com.google.ai.edge.gallery"
@@ -51,11 +92,23 @@ android {
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
 
+  signingConfigs {
+    // Filled only when every value is there; otherwise the release tasks stop (see the end of this file).
+    create("release") {
+      if (releaseSigningMissing.isEmpty()) {
+        storeFile = file(releaseSigning.getValue("storeFile"))
+        storePassword = releaseSigning.getValue("storePassword")
+        keyAlias = releaseSigning.getValue("keyAlias")
+        keyPassword = releaseSigning.getValue("keyPassword")
+      }
+    }
+  }
+
   buildTypes {
     release {
       isMinifyEnabled = false
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-      signingConfig = signingConfigs.getByName("debug")
+      signingConfig = signingConfigs.getByName("release")
     }
   }
   compileOptions {
@@ -173,5 +226,32 @@ protobuf {
         create("kotlin") { option("lite") }
       }
     }
+  }
+}
+
+// Model Shelf: a release build without its key stops before any task runs (the values: after the plugins
+// block). The tasks below make or sign a release APK or app bundle; nothing else reads the key.
+val releaseSigningTasks =
+  Regex(
+    "^(assembleRelease|bundleRelease|packageRelease|packageReleaseBundle|signReleaseBundle|" +
+      "validateSigningRelease|installRelease|packageReleaseUniversalApk|" +
+      "(makeApkFromBundleFor|extractApksFor)Release)$"
+  )
+gradle.taskGraph.whenReady {
+  val needsKey =
+    allTasks.filter {
+      it.path.startsWith("${project.path}:") &&
+        releaseSigningTasks.matches(it.path.substringAfterLast(':'))
+    }
+  if (needsKey.isNotEmpty() && releaseSigningMissing.isNotEmpty()) {
+    throw GradleException(
+      "The release build has no release key (missing: ${releaseSigningMissing.joinToString()}), so " +
+        "${needsKey.first().path} stops here instead of signing with the debug key or making an " +
+        "unsigned file: pass storeFile, storePassword, keyAlias and keyPassword as " +
+        "-Pmodelshelf.release.<name> Gradle properties, as the MODELSHELF_RELEASE_STORE_FILE, " +
+        "_STORE_PASSWORD, _KEY_ALIAS and _KEY_PASSWORD environment variables, or in a properties " +
+        "file outside the checkout (${releaseSigningFile.path}, or the file that " +
+        "-Pmodelshelf.release.signing or MODELSHELF_RELEASE_SIGNING names)."
+    )
   }
 }
