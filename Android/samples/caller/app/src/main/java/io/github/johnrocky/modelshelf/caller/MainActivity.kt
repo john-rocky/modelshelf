@@ -202,6 +202,35 @@ class MainActivity : Activity() {
     startHarness(intent)
     startSpeechHarness(intent)
     startStallHarness(intent)
+    openLinkHarness(intent)
+  }
+
+  /**
+   * Started with [EXTRA_OPEN_LINK] = a Model Shelf link (its scheme is Model Shelf's package name), it
+   * opens the link from this activity the way a browser opens a tapped link: ACTION_VIEW with the
+   * BROWSABLE category and no FLAG_ACTIVITY_NEW_TASK, so Android starts the target in this app's task
+   * unless the target says otherwise. A debuggable build's test harness only (D-614 round 10c, the path
+   * of a link opened from another app).
+   */
+  private fun openLinkHarness(intent: Intent?) {
+    val link = intent?.getStringExtra(EXTRA_OPEN_LINK) ?: return
+    val why =
+      when {
+        (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) == 0 -> "this build is not debuggable"
+        !link.startsWith("$MODEL_SHELF://") -> "the link is not a Model Shelf link"
+        else -> null
+      }
+    if (why != null) {
+      Log.i(TAG, "open link harness: not started ($why)")
+      return
+    }
+    val view = Intent(Intent.ACTION_VIEW, Uri.parse(link)).addCategory(Intent.CATEGORY_BROWSABLE)
+    Log.i(TAG, "open link harness: opening $link (flags 0x${Integer.toHexString(view.flags)})")
+    try {
+      startActivity(view)
+    } catch (e: android.content.ActivityNotFoundException) {
+      Log.i(TAG, "open link harness: nothing opens $link")
+    }
   }
 
   private fun baseUrl(): String? = prefs.getString(KEY_BASE_URL, null)
@@ -1369,6 +1398,8 @@ class MainActivity : Activity() {
     const val EXTRA_SPEECH_HARNESS_VOICE = "speech_harness_voice"
     const val NO_SUCH_VOICE = "no_such_voice"
     const val EXTRA_STALL_HARNESS_DIR = "stall_harness_dir"
+    /** Link harness extra (adb shell am start ... --es open_link <Model Shelf link>), debuggable builds only. */
+    const val EXTRA_OPEN_LINK = "open_link"
     const val EXTRA_STALL_HOLD_S = "stall_hold_s"
   }
 }
