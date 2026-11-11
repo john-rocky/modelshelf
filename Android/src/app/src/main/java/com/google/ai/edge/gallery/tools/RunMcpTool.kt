@@ -47,7 +47,8 @@ class RunMcpTool(
     @ToolParam(description = "The name of the tool to run.") toolName: String,
     @ToolParam(description = "The parameters passed to tool as input") input: String,
   ): Map<String, String> {
-    Log.d(TAG, "Run MCP tool:\n- name: $toolName\n- input: $input")
+    // Model Shelf: names and lengths only: the model's words can be the user's own.
+    Log.d(TAG, "Run MCP tool: name ${toolName.length}, input ${input.length} characters")
     return runBlocking(Dispatchers.IO) {
       val serverState =
         mcpServersProvider.mcpServers.find { serverState ->
@@ -55,7 +56,7 @@ class RunMcpTool(
         }
 
       if (serverState == null) {
-        Log.w(TAG, "MCP server or tool not found for: $toolName")
+        Log.w(TAG, "MCP server or tool not found (its name has ${toolName.length} characters)")
         logMcpExecution(success = false, errorType = "tool_not_found")
         return@runBlocking guardMissingEntityWithSkillFallback(name = toolName, type = "Tool")
       }
@@ -113,7 +114,7 @@ class RunMcpTool(
         if (result.isError == true) {
           val errorText =
             result.content.filterIsInstance<TextContent>().joinToString("\n") { it.text }
-          Log.e(TAG, "MCP tool \"$toolName\" failed: $errorText")
+          Log.e(TAG, "MCP tool \"$toolName\" failed: ${errorText.length} characters")
           executionContext
             ?.actionChannel
             ?.send(
@@ -129,7 +130,7 @@ class RunMcpTool(
         } else {
           val successText =
             result.content.filterIsInstance<TextContent>().joinToString("\n") { it.text }
-          Log.d(TAG, "MCP tool \"$toolName\" succeeded:\n$successText")
+          Log.d(TAG, "MCP tool \"$toolName\" succeeded: ${successText.length} characters")
           executionContext
             ?.actionChannel
             ?.send(
@@ -144,7 +145,7 @@ class RunMcpTool(
           return@runBlocking mapOf("result" to successText, "status" to "succeeded")
         }
       } catch (e: Exception) {
-        Log.e(TAG, "Error calling MCP tool", e)
+        Log.e(TAG, "Error calling MCP tool \"$toolName\": ${e.javaClass.simpleName}")
         executionContext
           ?.actionChannel
           ?.send(

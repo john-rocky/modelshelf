@@ -151,7 +151,7 @@ open class DefaultAgentRuntimeExecutor(
   }
 
   private fun ProducerScope<AgentEvent>.emitEvent(event: AgentEvent) {
-    trySend(event).onFailure { Log.w(TAG, "Failed to emit event: $event", it) }
+    trySend(event).onFailure { Log.w(TAG, "Failed to emit event: ${event::class.simpleName}") }
   }
 
   override fun executeStream(

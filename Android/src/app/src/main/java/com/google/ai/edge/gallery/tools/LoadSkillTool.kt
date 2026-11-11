@@ -38,7 +38,7 @@ class LoadSkillTool(private val skillsProvider: SkillsProvider) : ToolDefinition
     return runBlocking(Dispatchers.Default) {
       val skill = skillsProvider.loadSkill(skillName)
       val skillContent = skill?.getSkillContent() ?: "Skill not found"
-      Log.d(TAG, "load skill. Skill content:\n$skillContent")
+      Log.d(TAG, "load skill. Skill content: ${skillContent.length} characters")
       if (skill != null) {
         executionContext
           ?.actionChannel

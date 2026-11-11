@@ -57,10 +57,11 @@ class RunJsTool(
     data: String,
   ): Map<String, Any> {
     return runBlocking(Dispatchers.Default) {
+      // Model Shelf: names and lengths only: the model's words can be the user's own.
       Log.d(
         TAG,
-        "runJS tool called with:" +
-          "\n- skillName: ${skillName}\n- scriptName: ${scriptName}\n- data: ${data}\n",
+        "runJS tool called: skill name ${skillName.length}, script name ${scriptName.length}, " +
+          "data ${data.length} characters",
       )
 
       val skill = skillsProvider.loadSkill(skillName)
@@ -101,7 +102,7 @@ class RunJsTool(
               key = getSkillSecretKey(skillName = skillName),
               value = secret,
             )
-            Log.d(TAG, "Got Secret from ask info dialog: ${secret.substring(0, 3)}")
+            Log.d(TAG, "Got a secret from the ask info dialog")
           } else {
             Log.d(TAG, "The ask info dialog got cancelled. No secret.")
           }
@@ -116,7 +117,7 @@ class RunJsTool(
           ?: return@runBlocking mapOf(
             "result" to "JS Skill URL not set properly or skill not found"
           )
-      Log.d(TAG, "Calling JS script.\n- url: $url\n- data: $data")
+      Log.d(TAG, "Calling JS script of skill '${skill.name}'. Data: ${data.length} characters")
 
       // Update progress.
       executionContext
@@ -166,10 +167,9 @@ class RunJsTool(
         if (webview != null) {
           Log.d(TAG, "Got an webview response.")
           val webviewUrl = skill.getJsSkillWebviewUrl(url = webview.url ?: "")
-          Log.d(TAG, "Webview url: $webviewUrl")
           resultWebviewToShow = webview.copy(url = webviewUrl)
         }
-        Log.d(TAG, "Result: ${resultJson.result}")
+        Log.d(TAG, "Result: ${resultJson.result?.length ?: 0} characters")
         mapOf("result" to (resultJson.result ?: ""), "status" to "succeeded")
       }
     }

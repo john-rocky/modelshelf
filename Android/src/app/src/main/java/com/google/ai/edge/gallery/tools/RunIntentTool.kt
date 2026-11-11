@@ -47,10 +47,11 @@ class RunIntentTool(private val context: Context, private val skillsProvider: Sk
   ): Map<String, String> {
     return runBlocking(Dispatchers.Default) {
       if (IntentAction.from(intent) == null) {
-        Log.w(TAG, "Intent not found: '$intent'")
+        // Model Shelf: names and lengths only: the model's words can be the user's own.
+        Log.w(TAG, "Intent not found (its name has ${intent.length} characters)")
         return@runBlocking guardMissingEntityWithSkillFallback(name = intent, type = "Intent")
       }
-      Log.d(TAG, "Run intent. Intent: '$intent', parameters: '$parameters'")
+      Log.d(TAG, "Run intent. Intent: '$intent', parameters: ${parameters.length} characters")
       executionContext
         ?.actionChannel
         ?.send(

@@ -167,10 +167,7 @@ fun GalleryWebView(
         webChromeClient =
           object : WebChromeClient() {
             override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
-              Log.d(
-                TAG,
-                "${consoleMessage?.message()} -- From line ${consoleMessage?.lineNumber()} of ${consoleMessage?.sourceId()}",
-              )
+              Log.d(TAG, "A console line of the page: ${consoleMessage?.lineNumber()}")
               onConsoleMessage?.invoke(consoleMessage)
               return super.onConsoleMessage(consoleMessage)
             }

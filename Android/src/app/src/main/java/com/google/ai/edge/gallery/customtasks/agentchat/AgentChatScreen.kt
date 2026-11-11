@@ -364,7 +364,7 @@ fun AgentChatScreen(
                 // Execute JS.
                 Log.d(TAG, "Start to run js")
                 chatViewJavascriptInterface.onResultListener = { result ->
-                  Log.d(TAG, "Got result:\n$result")
+                  Log.d(TAG, "Got result: ${result.length} characters")
                   action.result.complete(result)
                   val isSuccess = !result.contains("\"error\":")
                   val errorType = if (isSuccess) "" else "js_error"
@@ -468,11 +468,7 @@ fun AgentChatScreen(
               model = model,
               logMessage = logMessage,
             )
-            Log.d(
-              TAG,
-              "${curConsoleMessage.message()} " +
-                "-- From line ${curConsoleMessage.lineNumber()} of ${curConsoleMessage.sourceId()}",
-            )
+            Log.d(TAG, "A console line of a skill's page: ${curConsoleMessage.lineNumber()}")
           }
         },
       )

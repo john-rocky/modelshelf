@@ -101,6 +101,16 @@ data class ScheduleNotificationParams(
 object IntentHandler {
   private const val TAG = "IntentHandler"
 
+  /**
+   * Model Shelf: one log line of a failed action: its name, the argument's length and the
+   * exception's class. The argument can be the user's own words, and an exception's message can
+   * quote it, so neither is written (D-614 round 10e).
+   */
+  private fun logFailure(action: String, argument: String, e: Exception? = null) {
+    val cause = if (e == null) "" else ": ${e.javaClass.simpleName}"
+    Log.e(TAG, "Failed: $action (${argument.length} characters)$cause")
+  }
+
   suspend fun handleAction(
     context: Context,
     action: String,
@@ -127,11 +137,11 @@ object IntentHandler {
             context.startActivity(intent)
             "succeeded"
           } else {
-            Log.e(TAG, "Failed to parse send_email parameters: $parameters")
+            logFailure("send_email", parameters)
             "failed"
           }
         } catch (e: Exception) {
-          Log.e(TAG, "Failed to parse send_email parameters: $parameters", e)
+          logFailure("send_email", parameters, e)
           "failed"
         }
       }
@@ -147,11 +157,11 @@ object IntentHandler {
             context.startActivity(intent)
             "succeeded"
           } else {
-            Log.e(TAG, "Failed to parse send_sms parameters: $parameters")
+            logFailure("send_sms", parameters)
             "failed"
           }
         } catch (e: Exception) {
-          Log.e(TAG, "Failed to parse send_sms parameters: $parameters", e)
+          logFailure("send_sms", parameters, e)
           "failed"
         }
       }
@@ -175,11 +185,11 @@ object IntentHandler {
             context.startActivity(intent)
             "succeeded"
           } else {
-            Log.e(TAG, "Failed to parse create_calendar_event parameters: $parameters")
+            logFailure("create_calendar_event", parameters)
             "failed"
           }
         } catch (e: Exception) {
-          Log.e(TAG, "Failed to parse create_calendar_event parameters: $parameters", e)
+          logFailure("create_calendar_event", parameters, e)
           "failed"
         }
       }
@@ -189,10 +199,7 @@ object IntentHandler {
       IntentAction.GET_CURRENT_DATE_AND_TIME -> {
         val sdf = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss EEEE", Locale.getDefault())
         val currentDateAndTime = sdf.format(Date())
-        Log.d(
-          TAG,
-          "get_current_date_and_time via handleAction. Current date and time: $currentDateAndTime",
-        )
+        Log.d(TAG, "get_current_date_and_time via handleAction")
         currentDateAndTime
       }
       IntentAction.SCHEDULE_NOTIFICATION -> {
@@ -283,15 +290,15 @@ object IntentHandler {
           val responseAdapter = moshi.adapter(ReadCalendarEventsResponse::class.java)
           return responseAdapter.toJson(ReadCalendarEventsResponse(eventsList))
         } else {
-          Log.e(TAG, "Failed to parse read_calendar_events date: ${params.date}")
+          logFailure("read_calendar_events date", params.date)
           return "failed"
         }
       } else {
-        Log.e(TAG, "Failed to parse read_calendar_events parameters: $parameters")
+        logFailure("read_calendar_events", parameters)
         return "failed"
       }
     } catch (e: Exception) {
-      Log.e(TAG, "Failed to read calendar events: $parameters", e)
+      logFailure("read_calendar_events", parameters, e)
       return "failed: ${e.message}"
     }
   }
@@ -373,11 +380,11 @@ object IntentHandler {
         }
         return "succeeded"
       } else {
-        Log.e(TAG, "Failed to parse schedule_notification parameters: $parameters")
+        logFailure("schedule_notification", parameters)
         return "failed"
       }
     } catch (e: Exception) {
-      Log.e(TAG, "Failed to parse schedule_notification parameters: $parameters", e)
+      logFailure("schedule_notification", parameters, e)
       return "failed"
     }
   }
