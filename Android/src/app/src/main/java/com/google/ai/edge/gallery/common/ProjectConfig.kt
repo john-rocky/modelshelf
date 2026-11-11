@@ -41,4 +41,17 @@ object ProjectConfig {
       authEndpoint.toUri(), // Authorization endpoint
       tokenEndpoint.toUri(), // Token exchange endpoint
     )
+
+  /**
+   * Model Shelf: whether this build has a Hugging Face OAuth app, that is [clientId] and
+   * [redirectUri] are set instead of the placeholders above. Without one, Hugging Face's sign-in
+   * page would refuse the client id, so the app does not start the sign-in.
+   */
+  val isHuggingFaceSignInSetUp: Boolean
+    get() = isSetUp(clientId = clientId, redirectUri = redirectUri)
+
+  internal fun isSetUp(clientId: String, redirectUri: String): Boolean =
+    listOf(clientId, redirectUri).all { it.isNotBlank() && !it.startsWith(PLACEHOLDER_PREFIX) }
+
+  private const val PLACEHOLDER_PREFIX = "REPLACE_WITH"
 }

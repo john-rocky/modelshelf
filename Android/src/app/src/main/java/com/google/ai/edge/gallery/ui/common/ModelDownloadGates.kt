@@ -55,6 +55,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.google.ai.edge.gallery.R
+import com.google.ai.edge.gallery.common.ProjectConfig
 import com.google.ai.edge.gallery.data.DownloadAuthError
 import com.google.ai.edge.gallery.data.Model
 import com.google.ai.edge.gallery.ui.modelmanager.DownloadClickAction
@@ -70,12 +71,16 @@ private const val TAG = "AGModelDownloadGates"
  * Shared by [DownloadAndTryButton], which runs them for one model, and by screens that download
  * several models at once, which run them one after another with [runAll]. Create it with
  * [rememberModelDownloadGates] and render its dialogs with [ModelDownloadGatesHost].
+ *
+ * Model Shelf: a build without a Hugging Face OAuth app ([ProjectConfig.isHuggingFaceSignInSetUp])
+ * starts no sign-in; it says so in one sentence instead ([signInUnavailable]).
  */
 @Stable
 class ModelDownloadGates
 internal constructor(
   private val context: Context,
   private val modelManagerViewModel: ModelManagerViewModel,
+  private val isHuggingFaceSignInSetUp: () -> Boolean = { ProjectConfig.isHuggingFaceSignInSetUp },
 ) {
   /** The low-memory warning waiting for the user's answer, or `null` if none is shown. */
   internal var memoryWarning by mutableStateOf<MemoryWarningRequest?>(null)
@@ -83,6 +88,13 @@ internal constructor(
 
   /** The gated model whose user agreement sheet is shown, or `null` if none is shown. */
   internal var agreementSheetModel by mutableStateOf<Model?>(null)
+    private set
+
+  /**
+   * Whether the dialog that says this build has no Hugging Face sign-in is shown (a model needs a
+   * sign-in and the build has no OAuth app).
+   */
+  internal var signInUnavailable by mutableStateOf(false)
     private set
 
   internal var launchers: Launchers? = null
@@ -307,8 +319,21 @@ internal constructor(
     abortAccessRequest()
   }
 
+  /** Ends the download request once the user closes the no-sign-in dialog. */
+  internal fun onSignInUnavailableClosed() {
+    signInUnavailable = false
+    abortAccessRequest()
+  }
+
   /** Kicks off the authentication and token exchange flow. */
   private fun startTokenExchange() {
+    // Model Shelf: without an OAuth app, Hugging Face's sign-in page would refuse the placeholder
+    // client id. Say so in one sentence instead; its Close ends the download request.
+    if (!isHuggingFaceSignInSetUp()) {
+      Log.d(TAG, "Hugging Face sign-in is not set up in this build. Not starting it.")
+      signInUnavailable = true
+      return
+    }
     val authRequest = modelManagerViewModel.getAuthorizationRequest()
     val authIntent = modelManagerViewModel.authService.getAuthorizationRequestIntent(authRequest)
     launchers?.auth?.launch(authIntent)
@@ -402,7 +427,8 @@ fun rememberModelDownloadGates(
 }
 
 /**
- * Renders the dialogs of [gates]: the gated-repo user agreement sheet and the low-memory warning.
+ * Renders the dialogs of [gates]: the gated-repo user agreement sheet, the low-memory warning, and
+ * (Model Shelf) the dialog that says this build has no Hugging Face sign-in.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -443,6 +469,18 @@ fun ModelDownloadGatesHost(gates: ModelDownloadGates) {
     MemoryWarningAlert(
       onProceeded = { gates.onMemoryWarningProceeded() },
       onDismissed = { gates.onMemoryWarningDismissed() },
+    )
+  }
+
+  if (gates.signInUnavailable) {
+    AlertDialog(
+      onDismissRequest = { gates.onSignInUnavailableClosed() },
+      text = { Text(stringResource(R.string.hugging_face_sign_in_unavailable)) },
+      confirmButton = {
+        TextButton(onClick = { gates.onSignInUnavailableClosed() }) {
+          Text(stringResource(R.string.close))
+        }
+      },
     )
   }
 }
