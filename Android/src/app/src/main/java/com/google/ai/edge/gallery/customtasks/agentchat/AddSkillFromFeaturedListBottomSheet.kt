@@ -58,13 +58,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import com.google.ai.edge.gallery.R
 import com.google.ai.edge.gallery.data.AllowedSkill
+import com.google.ai.edge.gallery.ui.common.rememberExternalPageUriHandler
 import kotlinx.coroutines.launch
 
 /** A ModalBottomSheet Composable for displaying and adding skills from a featured list. */
@@ -81,7 +81,7 @@ fun AddSkillFromFeatureListBottomSheet(
   var skillToAdd by remember { mutableStateOf<AllowedSkill?>(null) }
   var skillValidationErrors by remember { mutableStateOf(emptyMap<String, String>()) }
   var validatingSkills by remember { mutableStateOf(emptySet<String>()) }
-  val uriHandler = LocalUriHandler.current
+  val uriHandler = rememberExternalPageUriHandler()
   val scope = rememberCoroutineScope()
   val uiState by skillManagerViewModel.uiState.collectAsState()
   val addedSkillNames = remember(uiState.skills) { uiState.skills.map { it.skill.name }.toSet() }

@@ -25,7 +25,14 @@ import android.net.Uri
 import android.util.Log
 import android.widget.Toast
 import androidx.browser.customtabs.CustomTabsIntent
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.UriHandler
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.LinkInteractionListener
 import java.net.URI
 
 private const val TAG = "AGExternalPages"
@@ -65,10 +72,10 @@ internal fun pageRoute(url: String): PageRoute {
 /**
  * Model Shelf: the one way the app opens a web page (D-614 round 10d).
  *
- * Only http(s) pages open, and only from an activity: the page opens in a Custom Tab, which the
- * phone's browser draws inside Model Shelf's task, and Back returns to Model Shelf. No new task is
- * asked for; without an activity nothing opens. A Play Store page opens in the Play Store app when
- * there is one. With no browser that shows Custom Tabs, the browser opens the page the usual way
+ * Only http(s) pages open, and only from an activity: the page opens in a Custom Tab started from
+ * that activity, with no new task asked for; without an activity nothing opens. Whether the page
+ * is drawn inside Model Shelf's task is up to the phone's browser. A Play Store page opens in the
+ * Play Store app when there is one. With no browser that shows Custom Tabs, the browser opens the page the usual way
  * (the library's behaviour); with no app that opens web pages, a short message says so. No link is
  * written to the log (a link in an answer can be the user's own words).
  *
@@ -114,13 +121,52 @@ private tailrec fun Context.activityToOpenFrom(): Activity? =
     else -> null
   }
 
+/** Model Shelf: a [UriHandler] whose pages open through [openExternalPage]. */
+interface OpensExternalPages : UriHandler
+
 /**
- * Model Shelf: the app's [UriHandler], provided at the root of the composition: every link that a
- * composable opens through [androidx.compose.ui.platform.LocalUriHandler] (link text, markdown,
- * answers, skill pages, the speech engine's store page) goes through [openExternalPage].
+ * Model Shelf: the app's [UriHandler], provided at the root of the composition. A Dialog or a sheet
+ * is a window of its own, where Compose provides a plain handler again, so a composable that opens
+ * a link does not read [LocalUriHandler] by itself: it reads [rememberExternalPageUriHandler] or
+ * [rememberExternalPageLinkListener], or sits under [ProvideExternalPageUriHandler] (D-614 round
+ * 10e). Every link of the app goes through [openExternalPage] that way, in any window.
  */
-class ExternalPageUriHandler(private val context: Context) : UriHandler {
+class ExternalPageUriHandler(private val context: Context) : OpensExternalPages {
   override fun openUri(uri: String) {
     openExternalPage(context, uri)
+  }
+}
+
+/**
+ * Model Shelf: the handler for a link in this window: the current one when it leads to
+ * [openExternalPage], else a new one on this window's context.
+ */
+@Composable
+fun rememberExternalPageUriHandler(): UriHandler {
+  val current = LocalUriHandler.current
+  val context = LocalContext.current
+  return remember(current, context) {
+    current as? OpensExternalPages ?: ExternalPageUriHandler(context)
+  }
+}
+
+/**
+ * Model Shelf: for what opens its links through [LocalUriHandler] by itself (the markdown library):
+ * [content] gets [rememberExternalPageUriHandler] as the composition's handler.
+ */
+@Composable
+fun ProvideExternalPageUriHandler(content: @Composable () -> Unit) {
+  CompositionLocalProvider(
+    LocalUriHandler provides rememberExternalPageUriHandler(),
+    content = content,
+  )
+}
+
+/** Model Shelf: the listener of a link built by hand or from html: [openExternalPage] opens it. */
+@Composable
+fun rememberExternalPageLinkListener(): LinkInteractionListener {
+  val handler = rememberExternalPageUriHandler()
+  return remember(handler) {
+    LinkInteractionListener { link -> (link as? LinkAnnotation.Url)?.let { handler.openUri(it.url) } }
   }
 }

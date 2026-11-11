@@ -41,6 +41,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.google.ai.edge.gallery.R
+import com.google.ai.edge.gallery.ui.common.rememberExternalPageLinkListener
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -85,21 +86,34 @@ fun MobileActionsChallengeDialog(
         text = stringResource(R.string.mobile_actions_challenge_instructions_title),
         fontWeight = FontWeight.Bold,
       )
+      val linkListener = rememberExternalPageLinkListener()
       val instructions = buildAnnotatedString {
         append(
-          AnnotatedString.fromHtml(stringResource(R.string.mobile_actions_challenge_instruction_1))
+          AnnotatedString.fromHtml(
+            stringResource(R.string.mobile_actions_challenge_instruction_1),
+            linkInteractionListener = linkListener,
+          )
         )
         append("\n")
         append(
-          AnnotatedString.fromHtml(stringResource(R.string.mobile_actions_challenge_instruction_2))
+          AnnotatedString.fromHtml(
+            stringResource(R.string.mobile_actions_challenge_instruction_2),
+            linkInteractionListener = linkListener,
+          )
         )
         append("\n")
         append(
-          AnnotatedString.fromHtml(stringResource(R.string.mobile_actions_challenge_instruction_3))
+          AnnotatedString.fromHtml(
+            stringResource(R.string.mobile_actions_challenge_instruction_3),
+            linkInteractionListener = linkListener,
+          )
         )
         append("\n")
         append(
-          AnnotatedString.fromHtml(stringResource(R.string.mobile_actions_challenge_instruction_4))
+          AnnotatedString.fromHtml(
+            stringResource(R.string.mobile_actions_challenge_instruction_4),
+            linkInteractionListener = linkListener,
+          )
         )
       }
       Text(

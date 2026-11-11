@@ -186,7 +186,11 @@ android {
   }
   // Model Shelf: the JVM tests reach code that logs through android.util.Log and takes a Context it
   // never reads; the Android stubs return defaults there instead of throwing.
-  testOptions { unitTests.isReturnDefaultValues = true }
+  testOptions {
+    unitTests.isReturnDefaultValues = true
+    // Robolectric's tests (a link inside a Dialog or sheet) read the merged manifest and resources.
+    unitTests.isIncludeAndroidResources = true
+  }
   packaging {
     jniLibs {
       pickFirsts.add("**/liblitertlm_jni.so")
@@ -261,6 +265,11 @@ dependencies {
   ksp("org.jetbrains.kotlin:kotlin-metadata-jvm:2.4.0")
   annotationProcessor("org.jetbrains.kotlin:kotlin-metadata-jvm:2.4.0")
   testImplementation(libs.junit)
+  // Model Shelf: JVM tests of Compose windows (a Dialog or sheet has a UriHandler of its own).
+  testImplementation(libs.robolectric)
+  testImplementation(libs.androidx.junit)
+  testImplementation(platform(libs.androidx.compose.bom))
+  testImplementation(libs.androidx.ui.test.junit4)
   androidTestImplementation(libs.androidx.junit)
   androidTestImplementation(libs.androidx.espresso.core)
   androidTestImplementation(platform(libs.androidx.compose.bom))

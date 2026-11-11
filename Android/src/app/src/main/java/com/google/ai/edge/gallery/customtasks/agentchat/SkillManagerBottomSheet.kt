@@ -97,7 +97,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalFocusManager
-import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
@@ -115,6 +114,7 @@ import com.google.ai.edge.gallery.proto.Skill
 import com.google.ai.edge.gallery.tools.getSkillSecretKey
 import com.google.ai.edge.gallery.ui.common.FloatingBanner
 import com.google.ai.edge.gallery.ui.common.GalleryWebView
+import com.google.ai.edge.gallery.ui.common.rememberExternalPageUriHandler
 import com.google.ai.edge.gallery.ui.theme.customColors
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
@@ -189,7 +189,7 @@ fun SkillManagerBottomSheet(
   var savedSelectedSkillsNamesAndDescriptions by remember { mutableStateOf("") }
   var filteredSkills by remember { mutableStateOf(uiState.skills) }
   val listState = rememberLazyListState()
-  val uriHandler = LocalUriHandler.current
+  val uriHandler = rememberExternalPageUriHandler()
 
   // Additional states for multi-select and section collapsing
   var hasDeterminedExpansionStates by remember { mutableStateOf(false) }

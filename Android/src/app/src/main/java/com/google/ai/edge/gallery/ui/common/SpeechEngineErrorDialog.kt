@@ -23,7 +23,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.stringResource
 import com.google.ai.edge.gallery.R
 import com.google.ai.edge.gallery.data.SpeechEngineError
@@ -93,7 +92,7 @@ fun SpeechEngineErrorDialog(
  */
 @Composable
 fun rememberOpenSpeechServicesStorePage(): () -> Unit {
-  val uriHandler = LocalUriHandler.current
+  val uriHandler = rememberExternalPageUriHandler()
   return remember(uriHandler) {
     {
       uriHandler.openUri("https://play.google.com/store/apps/details?id=com.google.android.tts")

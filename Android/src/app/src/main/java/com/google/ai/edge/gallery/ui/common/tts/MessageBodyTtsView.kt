@@ -45,6 +45,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.google.ai.edge.gallery.ui.common.MarkdownText
 import com.google.ai.edge.gallery.ui.common.markdownBodyTextStyle
+import com.google.ai.edge.gallery.ui.common.rememberExternalPageLinkListener
 import com.google.ai.edge.gallery.ui.theme.customColors
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.mapNotNull
@@ -155,6 +156,7 @@ private fun TtsParagraph(
   val wordHighlightColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.55f)
   val inlineCodeBackground = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)
   val linkColor = MaterialTheme.customColors.linkColor
+  val linkListener = rememberExternalPageLinkListener()
   val rendered =
     remember(
       content,
@@ -165,6 +167,7 @@ private fun TtsParagraph(
       wordHighlightColor,
       inlineCodeBackground,
       linkColor,
+      linkListener,
     ) {
       renderParagraph(
         content = content,
@@ -173,6 +176,7 @@ private fun TtsParagraph(
         highlightColor = highlightColor,
         inlineCodeBackground = inlineCodeBackground,
         linkColor = linkColor,
+        linkListener = linkListener,
         onSentenceClick = { currentOnSentenceClick(it) },
         activeWordIndex = activeWordIndex,
         wordHighlightColor = wordHighlightColor,

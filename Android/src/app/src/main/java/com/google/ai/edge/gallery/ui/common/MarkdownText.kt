@@ -19,7 +19,6 @@ package com.google.ai.edge.gallery.ui.common
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ProvideTextStyle
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.SpanStyle
@@ -60,7 +59,9 @@ fun MarkdownText(
   textColor: Color = MaterialTheme.colorScheme.onSurface,
   linkColor: Color = MaterialTheme.customColors.linkColor,
 ) {
-  CompositionLocalProvider {
+  // Model Shelf: the markdown library opens its links through the composition's UriHandler, in a
+  // Dialog or a sheet too (D-614 round 10e).
+  ProvideExternalPageUriHandler {
     ProvideTextStyle(
       value = markdownBodyTextStyle(smallFontSize = smallFontSize, textColor = textColor)
     ) {

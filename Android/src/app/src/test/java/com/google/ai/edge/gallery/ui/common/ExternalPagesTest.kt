@@ -120,20 +120,20 @@ class ExternalPagesTest {
     }
   }
 
-  // Every file of the app's code that opens something with a VIEW intent, a Custom Tab or the
-  // composition's UriHandler, and why it may. A new one fails this test until it goes through
-  // openExternalPage or is added here with its reason.
+  // Every file of the app's code that opens something with a VIEW intent, a Custom Tab or a
+  // UriHandler, and why it may. A new one fails this test until it goes through openExternalPage or
+  // is added here with its reason.
   private val openers =
     mapOf(
       "ui/common/ExternalPages.kt" to
         "the one function: a Custom Tab from the activity; a store page in the Play Store app",
       "MainActivity.kt" to "provides ExternalPageUriHandler at the root of the composition",
-      "ui/common/ClickableLink.kt" to "through the composition's UriHandler",
-      "ui/common/SpeechEngineErrorDialog.kt" to "the store page, through the composition's UriHandler",
+      "ui/common/ClickableLink.kt" to "through rememberExternalPageUriHandler",
+      "ui/common/SpeechEngineErrorDialog.kt" to "the store page, through rememberExternalPageUriHandler",
       "customtasks/agentchat/AddSkillFromFeaturedListBottomSheet.kt" to
-        "a skill's page, through the composition's UriHandler",
+        "a skill's page, through rememberExternalPageUriHandler",
       "customtasks/agentchat/SkillManagerBottomSheet.kt" to
-        "a skill's page, through the composition's UriHandler",
+        "a skill's page, through rememberExternalPageUriHandler",
       "ui/common/ModelDownloadGates.kt" to
         "a model's agreement page: a Custom Tab started for a result from the activity (as before)",
       "customtasks/mobileactions/MobileActionsViewModel.kt" to "a geo: map link, not a web page",
@@ -145,15 +145,140 @@ class ExternalPagesTest {
   @Test
   fun everyWebPageTheAppOpensGoesThroughOpenExternalPage() {
     val root = sourceRoot()
-    val opens = Regex("""ACTION_VIEW|CustomTabsIntent|\.openUri\(|LocalUriHandler provides|AndroidUriHandler""")
+    val opens =
+      Regex(
+        """ACTION_VIEW|android\.intent\.action\.VIEW|CustomTabsIntent|\.openUri\(|""" +
+          """LocalUriHandler provides|AndroidUriHandler"""
+      )
+    assertEquals(openers.keys.toSortedSet(), filesWith(root, opens))
+  }
+
+  // Line P3 (D-614 round 10e): a Dialog or a sheet is a window of its own, where Compose provides a
+  // plain UriHandler again. These fail when an upstream merge or a new screen brings back a link
+  // that depends on the window's handler.
+  @Test
+  fun onlyTheOneHelperReadsTheCompositionsUriHandler() {
+    assertEquals(
+      sortedSetOf("ui/common/ExternalPages.kt"),
+      filesWith(sourceRoot(), Regex("""LocalUriHandler\.current""")),
+    )
+  }
+
+  @Test
+  fun everyLinkAnnotationUrlHasAListener() {
+    val noListener = callsIn("""LinkAnnotation\.Url\(""").filterNot { (_, call) ->
+      call.contains("linkInteractionListener")
+    }
+    assertEquals(emptyList<Pair<String, String>>(), noListener)
+  }
+
+  // The only web pages that open outside openExternalPage, by name: both report back to the
+  // activity when they close (a model's agreement page, the Hugging Face sign-in). A third fails.
+  private val pagesThatReportBack =
+    listOf(
+      "ui/common/ModelDownloadGates.kt" to
+        "val customTabsIntent = CustomTabsIntent.Builder().build()",
+      "ui/common/ModelDownloadGates.kt" to
+        "val authIntent = modelManagerViewModel.authService.getAuthorizationRequestIntent(authRequest)",
+    )
+
+  @Test
+  fun onlyTheTwoPagesThatReportBackOpenOutsideTheOneFunction() {
+    val root = sourceRoot()
+    val opens =
+      Regex(
+        """CustomTabsIntent\.Builder\(|\.launchUrl\(|getAuthorizationRequestIntent\(|""" +
+          """performAuthorizationRequest\("""
+      )
     val found =
       root
         .walkTopDown()
         .filter { it.isFile && it.name.endsWith(".kt") }
-        .filter { file -> code(file.readText()).lineSequence().any { opens.containsMatchIn(it) } }
-        .map { it.relativeTo(root).path }
-        .toSortedSet()
-    assertEquals(openers.keys.toSortedSet(), found)
+        .flatMap { file ->
+          val path = file.relativeTo(root).path
+          code(file.readText()).lineSequence().filter { opens.containsMatchIn(it) }.map { path to it.trim() }
+        }
+        .filter { (path, _) -> path != "ui/common/ExternalPages.kt" }
+        .toList()
+    assertEquals(pagesThatReportBack, found)
+  }
+
+  // Html strings without a link in them, and why. Any other fromHtml passes a listener.
+  private val htmlWithoutLinks =
+    mapOf(
+      "ui/common/chat/ContextCompactionBanner.kt" to "token_limit_reached_message: <b> only",
+      "customtasks/xrlanguageteacher/views/studyview/XrLanguageTeacherVocabGameStartView.kt" to
+        "the how-to-play steps: <b> only",
+    )
+
+  @Test
+  fun everyHtmlStringWithALinkHasAListener() {
+    val noListener =
+      callsIn("""fromHtml\(""")
+        .filterNot { (path, call) ->
+          call.contains("linkInteractionListener") || path in htmlWithoutLinks
+        }
+    assertEquals(emptyList<Pair<String, String>>(), noListener)
+  }
+
+  @Test
+  fun theMarkdownLibraryIsDrawnOnlyUnderThePageHandler() {
+    val root = sourceRoot()
+    assertEquals(
+      sortedSetOf("ui/common/MarkdownText.kt"),
+      filesWith(root, Regex("""com\.halilibo\.richtext""")),
+    )
+    val markdownText = code(mainSource("ui/common/MarkdownText.kt"))
+    assertTrue(
+      "RichText is not under ProvideExternalPageUriHandler",
+      markdownText.indexOf("ProvideExternalPageUriHandler {") in 0 until markdownText.indexOf("RichText("),
+    )
+  }
+
+  // Other ways a text or a page can open a link, and where they may be.
+  @Test
+  fun noOtherKindOfLinkAppears() {
+    val root = sourceRoot()
+    assertEquals(
+      sortedSetOf<String>(),
+      filesWith(root, Regex("""Linkify|autoLink|URLSpan|LinkMovementMethod|Html\.fromHtml|HtmlCompat""")),
+    )
+    // A page inside a WebView stays in it unless its client sends it out.
+    assertEquals(
+      sortedSetOf("customtasks/tinygarden/TinyGardenScreen.kt"),
+      filesWith(root, Regex("""shouldOverrideUrlLoading""")),
+    )
+    assertTrue(code(mainSource("customtasks/tinygarden/TinyGardenScreen.kt")).contains("openExternalPage("))
+  }
+
+  /** Files under [root], relative, that have a code line matching [regex]. */
+  private fun filesWith(root: File, regex: Regex): java.util.SortedSet<String> =
+    root
+      .walkTopDown()
+      .filter { it.isFile && it.name.endsWith(".kt") }
+      .filter { file -> code(file.readText()).lineSequence().any { regex.containsMatchIn(it) } }
+      .map { it.relativeTo(root).path }
+      .toSortedSet()
+
+  /** (file, the call's text, parentheses balanced) of each call matching [opening] in the app. */
+  private fun callsIn(opening: String): List<Pair<String, String>> {
+    val root = sourceRoot()
+    val regex = Regex(opening)
+    val calls = mutableListOf<Pair<String, String>>()
+    for (file in root.walkTopDown().filter { it.isFile && it.name.endsWith(".kt") }) {
+      val source = code(file.readText())
+      for (match in regex.findAll(source)) {
+        var depth = 0
+        var i = match.range.last
+        while (i < source.length) {
+          if (source[i] == '(') depth++
+          if (source[i] == ')' && --depth == 0) break
+          i++
+        }
+        calls.add(file.relativeTo(root).path to source.substring(match.range.first, minOf(i + 1, source.length)))
+      }
+    }
+    return calls
   }
 
   // The "deeplink" extra that opened any page is gone, and no extra of the intent is read

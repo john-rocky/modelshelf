@@ -94,6 +94,7 @@ import com.google.ai.edge.gallery.tools.RequestPermissionToolAction
 import com.google.ai.edge.gallery.tools.SkillProgressToolAction
 import com.google.ai.edge.gallery.ui.common.BaseGalleryWebViewClient
 import com.google.ai.edge.gallery.ui.common.GalleryWebView
+import com.google.ai.edge.gallery.ui.common.rememberExternalPageLinkListener
 import com.google.ai.edge.gallery.ui.common.chat.ChatMessage
 import com.google.ai.edge.gallery.ui.common.chat.ChatMessageCollapsableProgressPanel
 import com.google.ai.edge.gallery.ui.common.chat.ChatMessageImage
@@ -527,7 +528,8 @@ fun AgentChatScreen(
                     AgentSkillsURLs.REPOSITORY,
                     AgentSkillsURLs.DISCUSSIONS,
                     stringResource(R.string.agent_skills),
-                  )
+                  ),
+                  linkInteractionListener = rememberExternalPageLinkListener(),
                 ),
                 style =
                   MaterialTheme.typography.headlineSmall.copy(fontSize = 16.sp, lineHeight = 22.sp),

@@ -19,6 +19,7 @@ package com.google.ai.edge.gallery.ui.common.tts
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.LinkInteractionListener
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.buildAnnotatedString
@@ -265,6 +266,7 @@ internal fun renderParagraph(
   highlightColor: Color,
   inlineCodeBackground: Color,
   linkColor: Color,
+  linkListener: LinkInteractionListener,
   onSentenceClick: (Int) -> Unit,
   activeWordIndex: Int? = null,
   wordHighlightColor: Color = highlightColor,
@@ -277,7 +279,7 @@ internal fun renderParagraph(
     for (sentence in paragraph.sentences.sortedBy { it.startIndex }) {
       val sentenceEnd = minOf(sentence.endIndex, paragraph.end)
       if (sentence.startIndex < cursor || sentenceEnd <= sentence.startIndex) continue
-      appendMarkdown(content, cursor, sentence.startIndex, inlineCodeStyle, linkColor)
+      appendMarkdown(content, cursor, sentence.startIndex, inlineCodeStyle, linkColor, linkListener)
 
       val outputStart = length
       val isCurrentSentence = sentence.id == activeSentenceId
@@ -299,10 +301,24 @@ internal fun renderParagraph(
             }
           val sentenceWeight = if (hasWordHighlight) null else FontWeight.Bold
           withStyle(SpanStyle(background = sentenceBg, fontWeight = sentenceWeight)) {
-            appendMarkdown(content, sentence.startIndex, sentenceEnd, inlineCodeStyle, linkColor)
+            appendMarkdown(
+              content,
+              sentence.startIndex,
+              sentenceEnd,
+              inlineCodeStyle,
+              linkColor,
+              linkListener,
+            )
           }
         } else {
-          appendMarkdown(content, sentence.startIndex, sentenceEnd, inlineCodeStyle, linkColor)
+          appendMarkdown(
+            content,
+            sentence.startIndex,
+            sentenceEnd,
+            inlineCodeStyle,
+            linkColor,
+            linkListener,
+          )
         }
       }
       val outputEnd = length
@@ -320,7 +336,7 @@ internal fun renderParagraph(
       sentenceRanges[sentence.id] = outputStart until outputEnd
       cursor = sentenceEnd
     }
-    appendMarkdown(content, cursor, paragraph.end, inlineCodeStyle, linkColor)
+    appendMarkdown(content, cursor, paragraph.end, inlineCodeStyle, linkColor, linkListener)
   }
   return RenderedParagraph(text, sentenceRanges)
 }
@@ -414,6 +430,7 @@ internal fun AnnotatedString.Builder.appendMarkdown(
   end: Int,
   inlineCodeStyle: SpanStyle,
   linkColor: Color = Color.Unspecified,
+  linkListener: LinkInteractionListener,
 ) {
   var lineStart = start
   while (lineStart < end) {
@@ -435,10 +452,10 @@ internal fun AnnotatedString.Builder.appendMarkdown(
     }
     if (isHeading) {
       withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
-        appendInlineMarkdown(line, inlineCodeStyle, linkColor)
+        appendInlineMarkdown(line, inlineCodeStyle, linkColor, linkListener)
       }
     } else {
-      appendInlineMarkdown(line, inlineCodeStyle, linkColor)
+      appendInlineMarkdown(line, inlineCodeStyle, linkColor, linkListener)
     }
     if (lineEnd < end) append('\n')
     lineStart = lineEnd + 1
@@ -449,6 +466,7 @@ internal fun AnnotatedString.Builder.appendInlineMarkdown(
   text: String,
   inlineCodeStyle: SpanStyle,
   linkColor: Color = Color.Unspecified,
+  linkListener: LinkInteractionListener,
 ) {
   var cursor = 0
   for (match in INLINE_MARKDOWN_REGEX.findAll(text)) {
@@ -463,7 +481,7 @@ internal fun AnnotatedString.Builder.appendInlineMarkdown(
     when {
       bold.isNotEmpty() || altBold.isNotEmpty() ->
         withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
-          appendInlineMarkdown(bold.ifEmpty { altBold }, inlineCodeStyle, linkColor)
+          appendInlineMarkdown(bold.ifEmpty { altBold }, inlineCodeStyle, linkColor, linkListener)
         }
       code.isNotEmpty() -> withStyle(inlineCodeStyle) { append(code) }
       linkLabel.isNotEmpty() -> {
@@ -472,15 +490,18 @@ internal fun AnnotatedString.Builder.appendInlineMarkdown(
             LinkAnnotation.Url(
               url = linkUrl,
               styles = TextLinkStyles(style = SpanStyle(color = linkColor)),
+              linkInteractionListener = linkListener,
             )
-          withLink(link) { appendInlineMarkdown(linkLabel, inlineCodeStyle, linkColor) }
+          withLink(link) {
+            appendInlineMarkdown(linkLabel, inlineCodeStyle, linkColor, linkListener)
+          }
         } else {
-          appendInlineMarkdown(linkLabel, inlineCodeStyle, linkColor)
+          appendInlineMarkdown(linkLabel, inlineCodeStyle, linkColor, linkListener)
         }
       }
       else ->
         withStyle(SpanStyle(fontStyle = FontStyle.Italic)) {
-          appendInlineMarkdown(italic.ifEmpty { altItalic }, inlineCodeStyle, linkColor)
+          appendInlineMarkdown(italic.ifEmpty { altItalic }, inlineCodeStyle, linkColor, linkListener)
         }
     }
     cursor = match.range.last + 1

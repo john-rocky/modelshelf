@@ -130,14 +130,15 @@ private fun logResourceLinkClick(url: String) {
 }
 
 /**
- * Returns a [TrackableUriHandler] wrapping the current [LocalUriHandler], or the current handler
- * itself if it already tracks clicks, so nested usages never log the same click twice.
+ * Returns a [TrackableUriHandler] wrapping this window's page handler (Model Shelf:
+ * [rememberExternalPageUriHandler], D-614 round 10e), or the current handler itself if it already
+ * tracks clicks, so nested usages never log the same click twice.
  */
 @Composable
 private fun rememberTrackableUriHandler(
   onLogUri: (String) -> Unit = ::logResourceLinkClick
 ): UriHandler {
-  val uriHandler = LocalUriHandler.current
+  val uriHandler = rememberExternalPageUriHandler()
   return remember(uriHandler, onLogUri) {
     uriHandler as? TrackableUriHandler ?: TrackableUriHandler(uriHandler, onLogUri)
   }
@@ -147,7 +148,7 @@ private fun rememberTrackableUriHandler(
 private class TrackableUriHandler(
   private val delegate: UriHandler,
   private val onLogUri: (String) -> Unit,
-) : UriHandler {
+) : OpensExternalPages {
   override fun openUri(uri: String) {
     onLogUri(uri)
     delegate.openUri(uri)
