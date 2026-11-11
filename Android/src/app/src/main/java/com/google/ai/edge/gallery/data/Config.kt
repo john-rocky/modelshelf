@@ -191,8 +191,9 @@ open class Config(
     /**
      * Creates the configuration settings displayed when importing an LLM model.
      *
-     * When [isForTestOnly] is true, specialized task toggles (`SUPPORT_TINY_GARDEN` and
-     * `SUPPORT_MOBILE_ACTIONS`) are omitted.
+     * Model Shelf registers neither the Tiny Garden nor the Mobile Actions task, so the import has
+     * no toggle for them (`SUPPORT_TINY_GARDEN`, `SUPPORT_MOBILE_ACTIONS`); [isForTestOnly], which
+     * once left those two out, no longer changes the list.
      */
     fun createLlmImportConfigs(
       accelerators: List<Accelerator> = DEFAULT_ACCELERATORS,
@@ -207,10 +208,6 @@ open class Config(
         add(createTemperatureSliderConfig(key = ConfigKeys.DEFAULT_TEMPERATURE))
         add(BooleanSwitchConfig(key = ConfigKeys.SUPPORT_IMAGE, defaultValue = false))
         add(BooleanSwitchConfig(key = ConfigKeys.SUPPORT_AUDIO, defaultValue = false))
-        if (!isForTestOnly) {
-          add(BooleanSwitchConfig(key = ConfigKeys.SUPPORT_TINY_GARDEN, defaultValue = false))
-          add(BooleanSwitchConfig(key = ConfigKeys.SUPPORT_MOBILE_ACTIONS, defaultValue = false))
-        }
         add(BooleanSwitchConfig(key = ConfigKeys.SUPPORT_THINKING, defaultValue = false))
         add(
           BooleanSwitchConfig(key = ConfigKeys.SUPPORT_SPECULATIVE_DECODING, defaultValue = false)
