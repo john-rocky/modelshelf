@@ -49,7 +49,9 @@ class SpeechWriteWatchTest {
     // Nobody reads: the channel takes 1 MiB, then a write waits.
     val channel = ByteChannel()
     val watch = WriteWatch(start = now(), deadline = Long.MAX_VALUE, stallMs = 400, time = ::now)
-    val took = withTimeout(10_000) { send(channel, watch, 3 * 1024 * 1024) }
+    withTimeout(10_000) { send(channel, watch, 3 * 1024 * 1024) }
+    // From the watch's own start, the clock the stall is counted on.
+    val took = now() - watch.start
     assertTrue(watch.cutWhy!!, watch.cutWhy!!.startsWith("the caller took no byte"))
     // Counted from the start of the writing: the bytes the buffer took do not reset it.
     assertTrue("took $took ms", took in 400L..6_000L)

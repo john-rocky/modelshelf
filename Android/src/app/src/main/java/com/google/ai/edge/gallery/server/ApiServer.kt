@@ -134,15 +134,21 @@ class ApiServer(
       return
     }
     val why = "MemAvailable ${m.availableKb} kB minus $needKb kB for $name is under the floor of $floor kB"
-    log("Memory: $why: unloading the API's other models first")
-    when (kind) {
-      Kind.VOICE -> {
-        host.unloadForMemory(why)
-        asr.unloadForMemory(why)
+    val unloaded =
+      when (kind) {
+        Kind.VOICE -> {
+          val chat = host.unloadForMemory(why)
+          val speech = asr.unloadForMemory(why)
+          chat || speech
+        }
+        Kind.CHAT,
+        Kind.SPEECH_RECOGNITION -> tts.unloadForMemory(why)
       }
-      Kind.CHAT,
-      Kind.SPEECH_RECOGNITION -> tts.unloadForMemory(why)
+    if (!unloaded) {
+      log("Memory: $why: nothing to unload")
+      return
     }
+    log("Memory: $why: unloaded the API's other models first")
     MemoryRule.read()?.let { log("Memory: MemAvailable ${it.availableKb} kB after the unload") }
   }
 
